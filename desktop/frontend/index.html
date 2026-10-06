@@ -1,0 +1,387 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Kivo</title>
+    <link rel="stylesheet" href="app.css" />
+    <script type="module" src="app.js"></script>
+  </head>
+  <body>
+    <svg class="symbols" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
+      <symbol id="i-home" viewBox="0 0 24 24">
+        <path d="m3 10 9-7 9 7v10a1 1 0 0 1-1 1h-5v-7H9v7H4a1 1 0 0 1-1-1Z" />
+      </symbol>
+      <symbol id="i-config" viewBox="0 0 24 24">
+        <path d="M5 3h14v18H5zM9 7h6M9 11h6M9 15h3" />
+      </symbol>
+      <symbol id="i-data" viewBox="0 0 24 24">
+        <path d="M4 19h16M7 15V9m5 6V4m5 11v-4" />
+      </symbol>
+      <symbol id="i-settings" viewBox="0 0 24 24">
+        <path d="M4 6h16M4 12h16M4 18h16" />
+        <circle cx="8" cy="6" r="2" />
+        <circle cx="16" cy="12" r="2" />
+        <circle cx="10" cy="18" r="2" />
+      </symbol>
+      <symbol id="i-plus" viewBox="0 0 24 24">
+        <path d="M12 5v14M5 12h14" />
+      </symbol>
+      <symbol id="i-refresh" viewBox="0 0 24 24">
+        <path
+          d="M20 7v5h-5M4 17v-5h5M6 7a7 7 0 0 1 12-1l2 3M4 15l2 3a7 7 0 0 0 12-1"
+        />
+      </symbol>
+      <symbol id="i-search" viewBox="0 0 24 24">
+        <circle cx="10.5" cy="10.5" r="6.5" />
+        <path d="m16 16 4 4" />
+      </symbol>
+      <symbol id="i-chevron" viewBox="0 0 24 24">
+        <path d="m9 5 7 7-7 7" />
+      </symbol>
+      <symbol id="i-info" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="9" />
+        <path d="M12 11v6m0-10v1" />
+      </symbol>
+      <symbol id="i-close" viewBox="0 0 24 24">
+        <path d="m6 6 12 12M6 18 18 6" />
+      </symbol>
+      <symbol id="i-check" viewBox="0 0 24 24">
+        <path d="m5 12 4 4L19 6" />
+      </symbol>
+      <symbol id="i-power" viewBox="0 0 24 24">
+        <path d="M12 3v9M6 5a9 9 0 1 0 12 0" />
+      </symbol>
+      <symbol id="i-download" viewBox="0 0 24 24">
+        <path d="M12 3v12m-5-5 5 5 5-5M4 16v5h16v-5" />
+      </symbol>
+    </svg>
+    <header class="app-header">
+      <button
+        id="openWeb"
+        class="icon-button"
+        title="在浏览器打开 Web 控制台"
+        aria-label="打开 Web 控制台"
+      >
+        <svg><use href="#i-config" /></svg>
+      </button>
+      <span class="wordmark">Kivo<span class="brand-dot"></span></span>
+      <button
+        id="addSubscription"
+        class="icon-button accent"
+        title="添加订阅"
+        aria-label="添加订阅"
+      >
+        <svg><use href="#i-plus" /></svg>
+      </button>
+    </header>
+    <div id="connectionAlert" class="backend-alert" hidden>
+      <span id="backendMessage">后台未连接</span
+      ><button id="reconnect" class="text-button">重试</button>
+    </div>
+    <div id="job" class="job" role="status" hidden>
+      <div class="job-top">
+        <span class="spinner"></span><span id="jobLabel"></span
+        ><span id="jobPercent"></span>
+      </div>
+      <progress id="jobProgress" max="100"></progress
+      ><small id="jobDetail"></small>
+    </div>
+    <main id="content">
+      <section
+        id="panel-home"
+        class="page"
+        role="tabpanel"
+        aria-labelledby="tab-home"
+      >
+        <div class="connection-card group">
+          <div class="connection-main">
+            <span id="connectionDot" class="status-dot"></span>
+            <div class="connection-copy">
+              <h1 id="connectionTitle">正在读取状态</h1>
+              <p id="connectionDetail">连接本地后台，不会自动改写系统代理</p>
+            </div>
+            <button
+              id="connect"
+              class="switch"
+              role="switch"
+              aria-checked="false"
+              aria-label="连接系统代理"
+              disabled
+            >
+              <span></span>
+            </button>
+          </div>
+          <button id="routing" class="setting-row">
+            <span>全局路由</span
+            ><span class="row-value" id="routeLabel">规则模式</span
+            ><svg class="icon"><use href="#i-chevron" /></svg>
+          </button>
+          <button id="checkConnectivity" class="setting-row">
+            <span>连通测试</span
+            ><span class="row-value" id="checkLabel">尚未检测</span
+            ><svg class="icon"><use href="#i-chevron" /></svg>
+          </button>
+        </div>
+        <div class="runtime-strip">
+          <p>
+            <span id="coreLabel">Mihomo · 状态未知</span
+            ><span class="separator">·</span><span id="tunLabel">TUN 关闭</span>
+          </p>
+          <p id="portLabel">HTTP / SOCKS5 · —</p>
+        </div>
+        <div id="connectionHint" class="inline-hint" hidden></div>
+        <div class="section-heading">
+          <h2>服务器</h2>
+          <button id="updateSubscriptions" class="text-button">
+            <svg class="icon"><use href="#i-refresh" /></svg>更新订阅
+          </button>
+        </div>
+        <div class="search-row">
+          <label class="search"
+            ><svg class="icon"><use href="#i-search" /></svg
+            ><input
+              id="nodeSearch"
+              type="search"
+              placeholder="搜索节点或订阅"
+              aria-label="搜索节点或订阅"
+              autocomplete="off" /></label
+          ><button id="testNodes" class="button small">测速</button>
+        </div>
+        <div id="nodeGroups" class="node-groups"></div>
+        <p id="nodesNotice" class="footnote"></p>
+        <p id="lastChecked" class="footnote centered">
+          连接状态不代表联网成功，请运行连通测试
+        </p>
+      </section>
+      <section
+        id="panel-config"
+        class="page"
+        role="tabpanel"
+        aria-labelledby="tab-config"
+        hidden
+      >
+        <div class="page-heading">
+          <h1>配置</h1>
+          <p>管理订阅与路由，和 CLI / Web 实时共用。</p>
+        </div>
+        <div class="section-heading">
+          <h2>订阅</h2>
+          <button id="configAddSub" class="text-button">添加订阅</button>
+        </div>
+        <div id="subscriptions" class="stack"></div>
+        <div class="section-heading">
+          <h2>订阅分组</h2>
+          <button id="addSubGroup" class="text-button">新建</button>
+        </div>
+        <div id="subscriptionGroups" class="stack"></div>
+        <div class="section-heading">
+          <h2>路由配置</h2>
+          <button id="addProfile" class="text-button">新建</button>
+        </div>
+        <p class="footnote">
+          先选择规则模式，再选择自定义路由。未匹配的流量按默认动作处理。
+        </p>
+        <div id="profiles" class="stack"></div>
+        <div class="section-heading">
+          <h2>规则组</h2>
+          <button id="addRuleGroup" class="text-button">新建</button>
+        </div>
+        <div id="ruleGroups" class="stack"></div>
+      </section>
+      <section
+        id="panel-data"
+        class="page"
+        role="tabpanel"
+        aria-labelledby="tab-data"
+        hidden
+      >
+        <div class="page-heading">
+          <h1>数据</h1>
+          <p>只显示实际状态与检测记录，不推测网络可用性。</p>
+        </div>
+        <div class="section-heading">
+          <h2>运行状态</h2>
+          <button id="refreshData" class="text-button">刷新</button>
+        </div>
+        <dl id="runtimeDetails" class="group detail-list"></dl>
+        <div class="section-heading">
+          <h2>联网检测</h2>
+          <button id="dataCheck" class="text-button">重新检测</button>
+        </div>
+        <div id="connectivityResults" class="stack"></div>
+        <div class="section-heading">
+          <h2>环境诊断</h2>
+          <button id="doctor" class="text-button">开始诊断</button>
+        </div>
+        <div id="doctorResults" class="stack">
+          <p class="empty-note">诊断不会修改系统设置。</p>
+        </div>
+        <div class="section-heading">
+          <h2>内核日志</h2>
+          <button id="refreshLogs" class="text-button">刷新</button>
+        </div>
+        <pre id="logs" class="logs" tabindex="0">
+点击刷新读取最近 200 行日志</pre
+        >
+      </section>
+      <section
+        id="panel-settings"
+        class="page"
+        role="tabpanel"
+        aria-labelledby="tab-settings"
+        hidden
+      >
+        <div class="page-heading">
+          <h1>设置</h1>
+          <p>轻量、离线资源、原生窗口。</p>
+        </div>
+        <div class="group">
+          <label class="setting-row"
+            ><span>外观</span
+            ><select id="theme" aria-label="外观主题">
+              <option value="system">跟随系统</option>
+              <option value="light">浅色</option>
+              <option value="dark">深色</option>
+            </select></label
+          >
+        </div>
+        <div class="section-heading"><h2>代理设置</h2></div>
+        <form id="settingsForm" class="group form-group">
+          <label class="field"
+            ><span>HTTP / SOCKS5 端口</span
+            ><input name="mixedPort" type="number" min="1" max="65535" required
+          /></label>
+          <label class="setting-row"
+            ><span>允许局域网接入</span><input name="allowLAN" type="checkbox"
+          /></label>
+          <label class="setting-row"
+            ><span>TUN 虚拟网卡</span><input name="tunEnabled" type="checkbox"
+          /></label>
+          <p class="footnote">
+            开启 TUN 可能需要管理员权限。局域网接入会扩大代理入口的可访问范围。
+          </p>
+          <label class="field"
+            ><span>内核下载代理</span
+            ><input
+              name="downloadProxy"
+              placeholder="留空直连 / system / http://127.0.0.1:端口"
+              autocomplete="off"
+          /></label>
+          <label class="field"
+            ><span>下载重试次数</span
+            ><input
+              name="downloadRetry"
+              type="number"
+              min="1"
+              max="10"
+              required
+          /></label>
+          <button class="button primary" type="submit">保存代理设置</button>
+        </form>
+        <div class="section-heading">
+          <h2>Mihomo 内核</h2>
+          <button id="installCore" class="text-button">安装 / 更新</button>
+        </div>
+        <div class="group padded">
+          <p id="installedCore" class="muted">正在读取内核信息</p>
+          <div class="actions">
+            <button id="coreStart" class="button small">启动</button
+            ><button id="coreRestart" class="button small">重启</button
+            ><button id="coreStop" class="button small">停止</button
+            ><button id="importCore" class="button small">本地导入</button>
+          </div>
+          <div id="coreVersions" class="stack"></div>
+        </div>
+        <div class="section-heading">
+          <h2>Web 访问安全</h2>
+          <span id="webSecurityLabel" class="muted"></span>
+        </div>
+        <form id="tokenForm" class="group form-group">
+          <label class="field"
+            ><span>设置新 Token</span
+            ><input
+              name="token"
+              type="password"
+              placeholder="留空表示关闭 Web 鉴权"
+              autocomplete="new-password"
+          /></label>
+          <p class="footnote">
+            立即生效。桌面端自动读取新凭据，不向页面返回原 Token。
+          </p>
+          <button class="button" type="submit">更新访问 Token</button>
+        </form>
+        <div class="section-heading"><h2>窗口与退出</h2></div>
+        <div class="group padded">
+          <p class="footnote">
+            关闭窗口仅退出界面，后台与当前代理继续运行。这里不是最小化到托盘。
+          </p>
+          <div class="actions">
+            <button id="quit" class="button">仅关闭窗口</button
+            ><button id="disconnectQuit" class="button danger">
+              断开并退出
+            </button>
+          </div>
+        </div>
+        <p id="appInfo" class="footnote centered"></p>
+        <p id="dataDirectory" class="footnote path"></p>
+      </section>
+    </main>
+    <nav class="tab-bar" role="tablist" aria-label="主要页面">
+      <button
+        id="tab-home"
+        class="tab active"
+        role="tab"
+        aria-selected="true"
+        aria-controls="panel-home"
+        data-tab="home"
+      >
+        <svg><use href="#i-home" /></svg><span>首页</span>
+      </button>
+      <button
+        id="tab-config"
+        class="tab"
+        role="tab"
+        aria-selected="false"
+        aria-controls="panel-config"
+        data-tab="config"
+        tabindex="-1"
+      >
+        <svg><use href="#i-config" /></svg><span>配置</span>
+      </button>
+      <button
+        id="tab-data"
+        class="tab"
+        role="tab"
+        aria-selected="false"
+        aria-controls="panel-data"
+        data-tab="data"
+        tabindex="-1"
+      >
+        <svg><use href="#i-data" /></svg><span>数据</span>
+      </button>
+      <button
+        id="tab-settings"
+        class="tab"
+        role="tab"
+        aria-selected="false"
+        aria-controls="panel-settings"
+        data-tab="settings"
+        tabindex="-1"
+      >
+        <svg><use href="#i-settings" /></svg><span>设置</span>
+      </button>
+    </nav>
+    <div id="toast" class="toast" role="status" hidden></div>
+    <dialog id="dialog" aria-labelledby="dialogTitle">
+      <div class="dialog-heading">
+        <h2 id="dialogTitle"></h2>
+        <button id="closeDialog" class="icon-button" aria-label="关闭弹窗">
+          <svg><use href="#i-close" /></svg>
+        </button>
+      </div>
+      <div id="dialogBody"></div>
+    </dialog>
+  </body>
+</html>

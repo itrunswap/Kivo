@@ -28,6 +28,15 @@ import (
 //go:embed assets/*
 var assets embed.FS
 
+// EmbeddedAssets 返回只读 Web 资源，桌面端复用同一份离线字体与许可文件。
+func EmbeddedAssets() fs.FS {
+	result, err := fs.Sub(assets, "assets")
+	if err != nil {
+		panic(err)
+	} // 嵌入路径由编译期保证，不依赖外部文件。
+	return result
+}
+
 // Server 是 Kivo 本地控制服务器。
 type Server struct {
 	service   *app.Service

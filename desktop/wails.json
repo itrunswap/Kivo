@@ -1,0 +1,17 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "Kivo",
+  "outputfilename": "kivo-desktop",
+  "frontend:dir": "frontend",
+  "frontend:install": "",
+  "frontend:build": "",
+  "frontend:dev:watcher": "",
+  "author": { "name": "Kivo", "email": "" },
+  "info": {
+    "companyName": "Kivo",
+    "productName": "Kivo",
+    "productVersion": "0.3.0",
+    "copyright": "Kivo",
+    "comments": "轻量级跨平台代理客户端"
+  }
+}

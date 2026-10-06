@@ -1,5 +1,11 @@
 # 第三方组件与许可声明
 
+## 桌面端依赖
+
+Kivo Desktop 使用 Wails 2（MIT）与 Go WebView2（MIT）及其 Go 依赖。构建时通过 `scripts/desktop-licenses` 收集模块中的原始 LICENSE / NOTICE，保存并随包分发 `desktop/THIRD_PARTY_LICENSES.txt`。Wails 使用系统 WebView；Windows WebView2 Runtime、macOS 系统框架与 Linux GTK / WebKitGTK 运行库分别受各自许可约束，不随本程序重新许可。
+
+桌面应用图标由项目自己的 Go 绘图脚本生成；不使用 Wails 默认图标、Shadowrocket 标识或参考网站品牌。布局参考不表示与参考产品存在合作。Kivo 自身许可证仍需所有者指定。
+
 
 ## LINUX DO Credit 设计基线
 

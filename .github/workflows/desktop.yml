@@ -1,0 +1,70 @@
+name: 桌面端原生构建与检查
+on:
+  workflow_dispatch:
+  pull_request:
+    paths: ['desktop/**', 'internal/**', 'scripts/**', '.github/workflows/desktop.yml']
+permissions:
+  contents: read
+concurrency:
+  group: desktop-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  desktop:
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: windows-latest, target: windows/amd64, artifact: kivo-desktop-windows-amd64}
+          - {os: windows-latest, target: windows/arm64, artifact: kivo-desktop-windows-arm64}
+          - {os: macos-15, target: darwin/universal, artifact: kivo-desktop-darwin-universal}
+          - {os: ubuntu-24.04, target: linux/amd64, artifact: kivo-desktop-linux-amd64, tags: webkit2_41}
+          - {os: ubuntu-24.04-arm, target: linux/arm64, artifact: kivo-desktop-linux-arm64, tags: webkit2_41}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: desktop/go.mod
+          cache-dependency-path: desktop/go.sum
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - name: Linux 系统 WebView 开发依赖
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev
+      - name: 检查共享代码与页面
+        run: |
+          go test ./...
+          go vet ./...
+          node --test scripts/test-desktop.mjs scripts/test-desktop-ui.mjs scripts/test-web.mjs
+          go run ./scripts/desktop-icon
+      - name: 检查桌面模块
+        working-directory: desktop
+        env:
+          GOFLAGS: '-tags=${{ matrix.tags }}'
+        run: |
+          go test ./...
+          go vet ./...
+      - name: 构建原生窗口程序
+        working-directory: desktop
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          BUILD_TAGS: ${{ matrix.tags }}
+          COMMIT: ${{ github.sha }}
+        run: |
+          go run github.com/wailsapp/wails/v2/cmd/wails@v2.15.0 build -s -skipbindings -trimpath -webview2 browser -platform "$TARGET" -tags "$BUILD_TAGS" -ldflags "-s -w -X github.com/itrunswap/Kivo/internal/version.Version=0.3.0-desktop-preview -X github.com/itrunswap/Kivo/internal/version.Commit=$COMMIT"
+          cd ..
+          go run ./scripts/desktop-licenses
+          cd desktop
+          cp ../docs/DESKTOP.md build/bin/
+          cp ../THIRD_PARTY_NOTICES.md THIRD_PARTY_LICENSES.txt build/bin/
+      - uses: actions/upload-artifact@v6
+        with:
+          name: ${{ matrix.artifact }}
+          path: desktop/build/bin/
+          if-no-files-found: error
+          retention-days: 14

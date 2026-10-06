@@ -18,3 +18,7 @@
 Thumbs.db
 *.log
 *.tmp
+/desktop/build/bin/
+/desktop/build/*/*.syso
+/desktop/frontend/wailsjs/
+/desktop/*.syso

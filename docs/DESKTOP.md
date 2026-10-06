@@ -1,0 +1,130 @@
+# Kivo 桌面端说明
+
+## 1. 产品与平台
+
+桌面端采用 Go + Wails 2 的原生窗口和系统 WebView，不额外分发 Chromium。页面使用原生 HTML / CSS / JavaScript，无外部 CDN。界面为紧凑单列、顶部连接开关、分组节点列表、首页 / 配置 / 数据 / 设置四个底部标签。它不是一个浏览器快捷方式。
+
+桌面端、CLI 和 Web 共用后台及配置。桌面可单独运行，自带隐藏后台入口，不要求最终用户安装 Go、Node.js 或 CLI。Mihomo 仍需在线安装或导入官方本地包。
+
+| 平台 | 运行依赖 | 验收边界 |
+| --- | --- | --- |
+| Windows AMD64 | Microsoft WebView2 Runtime | 本机原生构建与窗口测试 |
+| Windows ARM64 | ARM64 WebView2 Runtime | 提供构建目标；仍需 ARM64 实机验收 |
+| macOS Intel / M2 等 Apple Silicon | 系统 WKWebView | 提供 Universal 原生构建流水线，需 Mac 验收、签名与公证 |
+| Linux AMD64 / ARM64 | GTK 3、WebKitGTK 4.1 与图形桌面会话 | 提供原生构建流水线，需发行版实机验收 |
+
+无图形桌面的 Linux 服务器应使用 CLI / Web。系统代理接入依赖桌面环境；不支持时明确提示，不把内核运行误判为代理开启。当前产物尚未签名，不要为安装它全局关闭系统保护。
+
+## 2. 启动与目录
+
+Windows 解压桌面包，双击 `kivo-desktop.exe`，不弹出终端。缺少 WebView2 时按框架提示前往微软官方页面安装。Mac 使用 `.app`，Linux 在图形桌面运行 `./kivo-desktop`。
+
+默认配置目录与 CLI 相同，Windows 为 `%APPDATA%\Kivo`；如果存在原 `ProxyPilot/config.json`，继续复用旧目录，不复制或抛弃已有配置。Windows 的 `desktop-webview/` 是 WebView 缓存和主题偏好，不是订阅配置。真实配置仍在 `config.json`，后台日志在 `logs/controller.log`。
+
+```powershell
+.\kivo-desktop.exe --data-dir E:\KivoData
+```
+
+```bash
+./kivo-desktop --data-dir /path/to/kivo-data
+```
+
+同一数据目录只开一个桌面窗口；再次启动唤起原窗口。不同目录须设置不同的 Web、内核控制和混合代理端口。打开桌面不新增自动接入偏好；后台继承已经保存的恢复设置。升级前先退出旧 UI，使用 CLI `/shutdown` 停止旧后台。
+
+## 3. 完整使用流程
+
+1. 设置 → Mihomo 内核 → 安装 / 更新。显示实际下载字节、总量和速度；未知总量显示不定进度。仅后台确认完成才表示安装成功。
+2. 右上角 `+` 添加订阅，填写名称、地址、分组和认证 / 解密方式。普通、Basic、Bearer、Token 参数、AES 和 age 均复用已有后台。
+3. 首页 → 更新订阅 → 选择直连或当前节点代理。结果逐项显示路径、解析节点数和失败原因；未知数量不冒充 0。原本停止的内核会临时启动并恢复停止。
+4. 设置 → 启动内核。首页展开订阅、搜索并点击节点。离线缓存只供查看，不允许切换。
+5. 打开连接开关，验证代理入口、备份并接入系统代理。已有其他代理 / PAC 时先确认，不静默覆盖。
+6. 点击连通测试，数据页分别显示直连、代理入口、固定节点出口。打开开关不等于所有网站均可访问。
+
+直连只绕过 HTTP 系统代理 / 环境变量代理，无法绕过系统 VPN、TUN 或网络网关。代理更新需要已有可用节点。更新路径会保存为订阅偏好，不是仅本次有效。AES / age 是订阅解密方式，不是节点协议，密码在弹窗填写。
+
+## 4. 状态判断
+
+| 首页 | 含义 | 操作 |
+| --- | --- | --- |
+| 未连接 | 系统未接入 Kivo | 完成安装和节点选择后开启连接 |
+| 仅内核运行 | 内核运行但系统代理未接入 | 打开连接开关 |
+| 已连接（紫色） | 内核运行、端口监听、系统接入 | 运行连通测试 |
+| 已连接（绿色） | 上述条件成立，最近 2 分钟内代理入口检测通过 | 检测目标可达，不保证任意网站永久可用 |
+| 代理入口异常（红色） | 系统指向 Kivo，但内核或入口异常 | 断开 / 恢复，查看日志避免断网 |
+| 后台未连接 | 无法读取当前状态 | 重试后台；旧节点不可切换 |
+
+紫色单选标记只代表选择的节点。节点测速、系统代理配置、联网检测是三种不同状态；过期检测不继续显示绿色。
+
+## 5. 页面操作
+
+- 首页：连接 / 断开、规则 / 全局 / 直连模式、联网检测、节点分组搜索 / 选择 / 测速 / 详情与订阅更新。
+- 配置：订阅添加 / 编辑 / 启禁 / 删除、单订阅与分组更新 / 检查；订阅分组独占切换；路由配置、规则组创建 / 关联 / 使用 / 删除，逐条添加与删除规则。
+- 数据：真实后台、内核、监听、接入、节点、TUN 与订阅状态，三路径检测、环境诊断、最近 200 行内核日志。不伪造流量曲线或带宽统计。
+- 设置：系统 / 明 / 暗主题，代理端口、LAN、TUN、下载代理与重试；内核下载进度、原生文件导入、版本切换 / 删除、启停；Web Token 即时变更、备份恢复与退出。
+
+内置路由：`rule` 规则、`global` 全局、`direct` 直连、`bypass-cn` 绕过大陆、`proxy-only` 仅指定地址代理、`bypass-list` 指定地址直连。规则组必须关联活动配置才生效，同组规则按列表顺序匹配。
+
+编辑订阅地址留空保留原值，不把脱敏 URL 保存成真实地址；凭据留空保留原凭据，认证变更按后台校验。Token 不回显原值；留空可关闭鉴权，确认前提醒访问范围风险。桌面端自动读取新 Token，无需重启。
+
+配置可能重载运行中的内核。变更串行执行，进行安装或代理事务时阻止直接关闭窗口。TUN 可能需管理员权限，勿与其他代理的虚拟网卡冲突。
+
+## 6. 退出与恢复
+
+- 标题栏 `×` / 仅关闭窗口：退出 UI，后台与代理继续运行；不是最小化到托盘。
+- 断开并退出：恢复受管系统代理、停止内核、关闭 UI；后台管理服务保留供 CLI / Web 使用。冲突时保留窗口，不强制覆盖其他程序的设置。
+- 关闭全部后台：CLI `/shutdown` 或 `kivo shutdown`。
+
+有未恢复备份时，设置页显示恢复按钮。外部手动代理仍指向已停止端口、恢复冲突等情况按提示处理，不能将未恢复显示为成功。
+
+## 7. 架构与安全
+
+```text
+desktop/main.go                 原生窗口、文件选择、主题、生命周期
+  └─ internal/desktop           本机 API 白名单、最新凭据、安装进度流
+      └─ internal/controller    与 CLI 共用后台启动和复用逻辑
+          └─ server → app.Service → Mihomo / 平台系统代理
+desktop/frontend                独立紧凑界面与可测试的纯状态模型
+  └─ server.EmbeddedAssets()    复用离线中文字体
+```
+
+桌面独立 Go 模块，主模块仍为纯标准库，CLI 六平台交叉构建不受影响。原生桥只接受明确的 API 方法 / 路径，不允许任意 URL、外部主机、重定向、内部解密接口或页面透传 shutdown；本地 HTTP 不使用系统代理。每次读取最新 Web Token，Go 不向 JS 返回原凭据。批量失败保留部分成功结果。
+
+无外部字体、无浏览器远程调试端口。名称和日志用 `textContent`，不解释成 HTML。Wails 只使用默认可信本地 origin，不扩展外部绑定来源。关闭 UI 与停止后台分离；没有额外数据库或第二套代理业务状态。
+
+## 8. 开发与构建
+
+开发需 Go（版本按 `desktop/go.mod`）和 Node.js（测试）；用户不需要。Wails 固定 `v2.15.0`，不使用 v3 beta。Linux 需 gcc / pkg-config / GTK / WebKit 开发包，Mac 需 Xcode Command Line Tools。
+
+```powershell
+.\scripts\build-desktop.ps1 -Version 0.3.0-desktop-preview -Commit <提交号> -BuildDate <UTC时间>
+.\scripts\build-desktop.ps1 -Architecture arm64
+```
+
+```bash
+# Mac Universal（包含 Intel 与 M2 等 Apple Silicon）
+TARGET=darwin/universal sh scripts/build-desktop.sh
+# Ubuntu 24.04
+sudo apt-get install build-essential pkg-config libgtk-3-dev libwebkit2gtk-4.1-dev
+BUILD_TAGS=webkit2_41 sh scripts/build-desktop.sh
+```
+
+```text
+go test ./...
+go vet ./...
+node --test scripts/test-desktop.mjs scripts/test-desktop-ui.mjs scripts/test-web.mjs
+cd desktop
+go test ./...
+go vet ./...
+```
+
+Linux 桌面模块 `go test` / `go vet` 同样需要 `GOFLAGS=-tags=webkit2_41`。构建必须在对应系统进行，不能将 CLI 的无 CGO 六平台交叉编译视为桌面实机验证。
+
+冒烟测试必须独立目录、独立端口，关闭自动代理 / 内核启动且无代理备份：`kivo-desktop.exe --data-dir <隔离目录> --smoke-test`。页面验证原生桥、资源和四标签后写 `desktop-smoke.json` 并退出 UI，测试人员另行关闭隔离后台；不能用真实用户配置测试。
+
+`desktop.yml` 提供五平台目标原生 CI 与下载 artifact，不自动发布 Release、创建标签或签名。配置了流程不代表已经运行成功；正式发布前须完成 Mac / Linux 原生验收。
+
+## 9. 当前边界
+
+可用 `node scripts/preview-desktop.mjs` 启动明确标记“演示”的浏览器交互验收页，端口默认 19435。它只模拟内存状态，不读取真实订阅、不启动内核、不更改系统代理；不能用该演示页面验证实际能否联网。
+
+当前没有系统托盘、开机登录启动、自动升级、签名公证、二维码扫描和实时流量曲线。右上角 `+` 是订阅添加，不冒充扫码。完整 Web 保持独立，不为紧凑桌面删减 Web 功能。
