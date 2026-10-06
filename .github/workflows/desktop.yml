@@ -84,7 +84,7 @@ jobs:
           BUILD_TAGS: ${{ matrix.tags }}
           COMMIT: ${{ github.sha }}
         run: |
-          go run github.com/wailsapp/wails/v2/cmd/wails@v2.15.0 build -s -skipbindings -trimpath -webview2 browser -platform "$TARGET" -tags "$BUILD_TAGS" -ldflags "-s -w -X github.com/itrunswap/Kivo/internal/version.Version=0.3.1-desktop-preview -X github.com/itrunswap/Kivo/internal/version.Commit=$COMMIT"
+          go run github.com/wailsapp/wails/v2/cmd/wails@v2.15.0 build -s -skipbindings -trimpath -webview2 browser -platform "$TARGET" -tags "$BUILD_TAGS" -ldflags "-s -w -X github.com/itrunswap/Kivo/internal/version.Version=0.3.2-desktop-preview -X github.com/itrunswap/Kivo/internal/version.Commit=$COMMIT"
           cd ..
           go run ./scripts/desktop-licenses
           cd desktop

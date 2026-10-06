@@ -153,6 +153,9 @@ func (b *Bridge) Request(ctx context.Context, method, path, body string) Reply {
 		return Reply{Error: err.Error(), Status: 400}
 	}
 	timeout := 90 * time.Second
+	if method == http.MethodGet {
+		timeout = 8 * time.Second
+	}
 	if strings.Contains(path, "/subscriptions/") || path == "/api/v1/nodes/test" {
 		timeout = 6 * time.Minute
 	}

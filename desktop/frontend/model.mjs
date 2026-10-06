@@ -31,11 +31,19 @@ export function connectionView(overview, online = true, now = Date.now()) {
       check: "状态未知",
     };
   const running = overview.core?.state === "running";
+  // 新后台提供同一份展示契约；旧后台只作兼容回退，不能伪造新契约。
+  if (
+    overview.display?.title &&
+    !(overview.display.tone === "good" && !fresh(overview.connectivity, now))
+  )
+    return { ...overview.display };
   const attached = overview.systemProxy?.state === "this_app";
   const port = !!overview.proxyPortListening;
   const report = overview.connectivity;
   const entry = report?.routes?.find((item) => item.id === "entry");
-  const verified = fresh(report, now) && entry?.state === "ok";
+  const node = report?.routes?.find((item) => item.id === "node");
+  const verified =
+    fresh(report, now) && entry?.state === "ok" && node?.state === "ok";
   const on = running && attached && port;
   let title = on
     ? "已连接"
@@ -78,18 +86,43 @@ export function connectionView(overview, online = true, now = Date.now()) {
           : entry?.state === "skipped"
             ? "未执行入口检测"
             : "检测未通过";
+  let tone =
+    verified && on
+      ? "good"
+      : attached && !on
+        ? "error"
+        : on
+          ? "active"
+          : "idle";
+  if (
+    on &&
+    fresh(report, now) &&
+    ["failed", "partial"].includes(entry?.state)
+  ) {
+    title =
+      entry.state === "failed" ? "已接入 · 联网异常" : "已接入 · 部分可达";
+    tone = entry.state === "failed" ? "error" : "warn";
+  }
+  if (
+    on &&
+    fresh(report, now) &&
+    entry?.state === "ok" &&
+    node?.state !== "ok"
+  ) {
+    title = "已接入 · 节点待确认";
+    tone = "warn";
+  }
+  if (overview.systemProxy?.state === "unknown") tone = "error";
+  if (overview.systemProxy?.recoveryPending) {
+    title = "系统代理待恢复";
+    tone = "warn";
+  }
+  if (on && overview.core?.mode === "direct" && tone === "good") tone = "warn";
   return {
     title,
     detail,
     on,
-    tone:
-      verified && on
-        ? "good"
-        : attached && !on
-          ? "error"
-          : on
-            ? "active"
-            : "idle",
+    tone,
     check,
   };
 }

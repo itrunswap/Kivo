@@ -176,6 +176,7 @@ func TestUpdateSettingsKeepsModeAndRoutingProfileConsistent(t *testing.T) {
 	if got := store.Snapshot().Routing.ActiveProfile; got != "global" {
 		t.Fatalf("active profile = %q, want global", got)
 	}
+	settings = service.GetSettings()
 	settings.Mode = "rule"
 	if err := service.UpdateSettings(context.Background(), settings); err != nil {
 		t.Fatal(err)

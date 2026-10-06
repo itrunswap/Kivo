@@ -14,7 +14,10 @@ const now = Date.now(),
   report = {
     checkedAt: new Date(now).toISOString(),
     stale: false,
-    routes: [{ id: "entry", state: "ok" }],
+    routes: [
+      { id: "entry", state: "ok" },
+      { id: "node", state: "ok" },
+    ],
   };
 const overview = {
   core: { state: "running", currentNode: "Hong Kong", mode: "rule" },
@@ -22,7 +25,7 @@ const overview = {
   systemProxy: { state: "this_app", supported: true },
   connectivity: report,
 };
-test("只有入口接入、端口监听且检测有效才显示绿色", () => {
+test("只有入口接入、端口监听且入口及节点检测有效才显示绿色", () => {
   assert.equal(connectionView(overview, true, now).tone, "good");
   assert.equal(
     connectionView({ ...overview, connectivity: null }, true, now).tone,
@@ -34,6 +37,25 @@ test("只有入口接入、端口监听且检测有效才显示绿色", () => {
     "仅内核运行",
   );
 });
+test("入口通过但节点未通过不显示绿色", () => {
+  const result = connectionView(
+    {
+      ...overview,
+      connectivity: {
+        ...report,
+        routes: [
+          { id: "entry", state: "ok" },
+          { id: "node", state: "failed" },
+        ],
+      },
+    },
+    true,
+    now,
+  );
+  assert.equal(result.tone, "warn");
+  assert.match(result.title, /节点待确认/);
+});
+
 test("后台断开禁止误显示已连接", () => {
   assert.equal(connectionView(overview, false).on, false);
   assert.equal(connectionView(overview, false).tone, "error");

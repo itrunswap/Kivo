@@ -4,11 +4,12 @@ import vm from "node:vm";
 import test from "node:test";
 import assert from "node:assert/strict";
 import * as model from "../desktop/frontend/model.mjs";
+import * as sync from "../desktop/frontend/sync.mjs";
 
 const source = readFileSync(
   new URL("../desktop/frontend/app.js", import.meta.url),
   "utf8",
-).replace(/^import[\s\S]*?from "\.\/model\.mjs";/, "");
+).replace(/^import[\s\S]*?from "\.\/(model|sync)\.mjs";/gm, "");
 const functions = source.slice(0, source.indexOf("// 可见窗口每 5 秒刷新状态"));
 
 function harness(handler = async () => ({ data: {}, status: 200 })) {
@@ -40,10 +41,34 @@ function harness(handler = async () => ({ data: {}, status: 200 })) {
         },
       },
       append(...children) {
-        this.children.push(...children);
+        children.forEach((child) => this.insertBefore(child, null));
       },
       replaceChildren(...children) {
-        this.children = children;
+        this.children.forEach((child) => {
+          child.parentNode = null;
+        });
+        this.children = [];
+        this.append(...children);
+      },
+      insertBefore(child, reference) {
+        child.remove?.();
+        const index = reference
+          ? this.children.indexOf(reference)
+          : this.children.length;
+        this.children.splice(index, 0, child);
+        Object.defineProperty(child, "parentNode", {
+          value: this,
+          writable: true,
+          configurable: true,
+          enumerable: false,
+        });
+      },
+      remove() {
+        if (this.parentNode) {
+          const siblings = this.parentNode.children;
+          siblings.splice(siblings.indexOf(this), 1);
+          this.parentNode = null;
+        }
       },
       setAttribute(name, value) {
         this[name] = value;
@@ -110,6 +135,7 @@ function harness(handler = async () => ({ data: {}, status: 200 })) {
     document,
     window: { go: { main: { Desktop: { Request: handler } } } },
     ...model,
+    ...sync,
     setTimeout: () => 0,
     clearTimeout() {},
     matchMedia: () => ({ matches: false }),
@@ -143,7 +169,7 @@ test("订阅更新结果弹窗保留部分成功数量，不被输入弹窗再�
     error: "B 更新失败",
   }));
   h.run(
-    "refreshAll=async()=>{};renderNodes=()=>{};renderOverview=()=>{};updateDialog()",
+    "refreshChanged=async()=>[];renderNodes=()=>{};renderOverview=()=>{};updateDialog()",
   );
   const form = h.nodes.get("dialogBody").children[0];
   await form.events.get("submit")({ preventDefault() {} });
@@ -161,12 +187,12 @@ test("订阅更新结果弹窗保留部分成功数量，不被输入弹窗再�
 
 test("编辑不把脱敏地址或空密码覆盖真实配置", async () => {
   let input;
-  const h = harness(async (path, method, body) => {
+  const h = harness(async (method, path, body) => {
     input = JSON.parse(body);
     return { status: 200, data: { updated: true } };
   });
   h.run(
-    'state.groups=[{name:"default"}];refreshAll=async()=>{};renderNodes=()=>{};renderOverview=()=>{};editSubscription({name:"A",url:"https://masked.invalid?token=***",group:"default",authType:"aes",updateVia:"direct"})',
+    'state.groups=[{name:"default"}];refreshChanged=async()=>[];renderNodes=()=>{};renderOverview=()=>{};editSubscription({name:"A",url:"https://masked.invalid?token=***",group:"default",authType:"aes",updateVia:"direct"})',
   );
   const form = h.nodes.get("dialogBody").children[0];
   await form.events.get("submit")({ preventDefault() {} });
@@ -176,13 +202,13 @@ test("编辑不把脱敏地址或空密码覆盖真实配置", async () => {
   assert.equal(input.authType, undefined);
 });
 
-test("事务结束重新派生节点禁用条件", () => {
+test("事务结束解除忙碌状态但不重建节点列表", () => {
   const h = harness();
   h.run(
     "globalThis.renders=0;renderNodes=()=>renders++;renderOverview=()=>{};state.busy=true;endJob()",
   );
   assert.equal(h.run("state.busy"), false);
-  assert.equal(h.run("renders"), 1);
+  assert.equal(h.run("renders"), 0);
 });
 
 test("过期节点详情不会把旧延迟误标为实时结果", () => {
@@ -234,4 +260,108 @@ test("恢复窗口刷新状态不会覆盖尚未保存的设置表单", () => {
   // 空表单没有控件：若恢复流程错误地重填表单，此处会抛异常。
   assert.equal(h.nodes.get("settingsForm"), undefined);
   assert.match(h.nodes.get("installedCore").textContent, /尚未安装/);
+});
+
+test("连接只刷新状态与节点，局部读取失败不会推翻操作成功", async () => {
+  const calls = [];
+  const h = harness(async (method, path) => {
+    calls.push([method, path]);
+    if (method === "POST") return { status: 200, data: {} };
+    if (path.endsWith("/nodes")) return { status: 503, error: "节点暂不可读" };
+    return {
+      status: 200,
+      data: {
+        core: { state: "running" },
+        systemProxy: { state: "this_app", supported: true },
+        proxyPortListening: true,
+      },
+    };
+  });
+  const result = await h.run(
+    'perform("连接",()=>api("/api/v1/connection/connect","POST",{}),{success:"已连接"})',
+  );
+  assert.equal(result, true);
+  assert.deepEqual(calls, [
+    ["POST", "/api/v1/connection/connect"],
+    ["GET", "/api/v1/overview"],
+    ["GET", "/api/v1/nodes"],
+  ]);
+  assert.equal(h.run("state.online"), true);
+  assert.equal(h.run("state.nodesFresh"), false);
+  assert.equal(h.nodes.get("syncNotice").hidden, false);
+  assert.match(h.nodes.get("toast").textContent, /已连接.*部分状态暂未刷新/);
+});
+
+test("晚返回的旧状态不能覆盖操作后的新状态", async () => {
+  const replies = [];
+  const h = harness(() => new Promise((resolve) => replies.push(resolve)));
+  const old = h.run('readResource("overview")');
+  h.run("gate.invalidate()");
+  const latest = h.run('readResource("overview")');
+  replies[1]({ status: 200, data: { marker: "latest" } });
+  await latest;
+  replies[0]({ status: 200, data: { marker: "obsolete" } });
+  assert.equal(await old, false);
+  assert.equal(h.run("state.overview.marker"), "latest");
+});
+
+test("节点局部更新保留 DOM、焦点、展开和业务禁用条件", () => {
+  const h = harness();
+  h.run(
+    'state.online=true;state.nodesFresh=true;state.overview={core:{state:"running"},systemProxy:{supported:true}};state.nodes=[{name:"A",providerName:"S",type:"ss",tested:true,alive:true,delay:60}];state.subs=[{name:"S",enabled:true}];renderNodes();globalThis.row=[...state.nodeRows.values()][0];row.choose.focus();state.busy=true;updateAvailability()',
+  );
+  assert.equal(h.run("row.choose.disabled"), true);
+  h.run("state.nodes[0].delay=42;renderNodes();endJob()");
+  assert.equal(h.run("row === [...state.nodeRows.values()][0]"), true);
+  assert.equal(h.run("document.activeElement===row.choose"), true);
+  assert.equal(h.run("row.delay.textContent"), "42 ms");
+  assert.equal(h.run("row.choose.disabled"), false);
+  assert.equal(h.run("[...state.nodeGroups.values()][0].root.open"), true);
+  h.run("state.nodesFresh=false;updateAvailability()");
+  assert.equal(h.run("row.choose.disabled"), true);
+});
+
+test("设置刷新保留未保存草稿及其原版本", async () => {
+  const h = harness(async () => ({
+    status: 200,
+    data: { revision: "new", mixedPort: 4567 },
+  }));
+  h.run(
+    'field($("settingsForm"),{name:"mixedPort",label:"端口",value:9999});state.settings={revision:"old",mixedPort:1234};renderSettings();state.dirty=true;$("settingsForm").elements.namedItem("mixedPort").value="9999"',
+  );
+  await h.run('refreshResources(["settings"])');
+  assert.equal(
+    h.run('$("settingsForm").elements.namedItem("mixedPort").value'),
+    "9999",
+  );
+  assert.equal(h.run("state.draft.revision"), "old");
+  assert.match(h.nodes.get("settingsDraft").textContent, /当前草稿已保留/);
+});
+
+test("旧后台不支持局部保存时禁止发送危险 PATCH", async () => {
+  let called = false;
+  const h = harness(async () => {
+    called = true;
+    return { status: 200, data: {} };
+  });
+  await assert.rejects(
+    h.run('api("/api/v1/settings","PATCH",{mode:"global"})'),
+    /后台版本过旧/,
+  );
+  assert.equal(called, false);
+});
+
+test("重复点击当前标签不跳回页面顶部", () => {
+  const h = harness();
+  h.run('$("content").scrollTop=237;setTab("home")');
+  assert.equal(h.nodes.get("content").scrollTop, 237);
+});
+
+test("操作返回恢复警告时不能改写为成功", async () => {
+  const h = harness();
+  await h.run(
+    'perform("断开",async()=>({warning:true,message:"外部代理已改变，请检查备份"}),{refresh:false,success:"已断开"})',
+  );
+  assert.match(h.nodes.get("toast").textContent, /外部代理已改变/);
+  assert.equal(h.nodes.get("toast").classList.contains("error"), true);
 });

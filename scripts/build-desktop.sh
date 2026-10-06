@@ -3,7 +3,7 @@
 set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$ROOT"
-VERSION=${VERSION:-0.3.1-desktop-preview}
+VERSION=${VERSION:-0.3.2-desktop-preview}
 COMMIT=${COMMIT:-none}
 BUILD_DATE=${BUILD_DATE:-unknown}
 TARGET=${TARGET:-}

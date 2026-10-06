@@ -125,6 +125,9 @@
           </button>
         </div>
         <div class="runtime-strip">
+          <button id="currentNode" class="current-node" title="定位当前节点">
+            尚未选择节点
+          </button>
           <p>
             <span id="coreLabel">Mihomo · 状态未知</span
             ><span class="separator">·</span><span id="tunLabel">TUN 关闭</span>
@@ -164,31 +167,39 @@
       >
         <div class="page-heading">
           <h1>配置</h1>
-          <p>管理订阅与路由，和 CLI / Web 实时共用。</p>
+          <p>管理订阅与分流规则</p>
         </div>
-        <div class="section-heading">
-          <h2>订阅</h2>
-          <button id="configAddSub" class="text-button">添加订阅</button>
+        <div class="segmented" role="group" aria-label="配置分类">
+          <button id="configSubscriptions" aria-pressed="true">订阅</button>
+          <button id="configRouting" aria-pressed="false">分流规则</button>
         </div>
-        <div id="subscriptions" class="stack"></div>
-        <div class="section-heading">
-          <h2>订阅分组</h2>
-          <button id="addSubGroup" class="text-button">新建</button>
+        <div id="configSubscriptionsBody">
+          <div class="section-heading">
+            <h2>订阅</h2>
+            <button id="configAddSub" class="text-button">添加订阅</button>
+          </div>
+          <div id="subscriptions" class="stack"></div>
+          <div class="section-heading">
+            <h2>订阅分组</h2>
+            <button id="addSubGroup" class="text-button">新建</button>
+          </div>
+          <div id="subscriptionGroups" class="stack"></div>
         </div>
-        <div id="subscriptionGroups" class="stack"></div>
-        <div class="section-heading">
-          <h2>路由配置</h2>
-          <button id="addProfile" class="text-button">新建</button>
+        <div id="configRoutingBody" hidden>
+          <div class="section-heading">
+            <h2>路由配置</h2>
+            <button id="addProfile" class="text-button">新建</button>
+          </div>
+          <p class="footnote">
+            先选择规则模式，再选择自定义路由。未匹配的流量按默认动作处理。
+          </p>
+          <div id="profiles" class="stack"></div>
+          <div class="section-heading">
+            <h2>规则组</h2>
+            <button id="addRuleGroup" class="text-button">新建</button>
+          </div>
+          <div id="ruleGroups" class="stack"></div>
         </div>
-        <p class="footnote">
-          先选择规则模式，再选择自定义路由。未匹配的流量按默认动作处理。
-        </p>
-        <div id="profiles" class="stack"></div>
-        <div class="section-heading">
-          <h2>规则组</h2>
-          <button id="addRuleGroup" class="text-button">新建</button>
-        </div>
-        <div id="ruleGroups" class="stack"></div>
       </section>
       <section
         id="panel-data"
@@ -198,33 +209,47 @@
         hidden
       >
         <div class="page-heading">
-          <h1>数据</h1>
-          <p>只显示实际状态与检测记录，不推测网络可用性。</p>
+          <h1>状态</h1>
+          <p>接入情况与最近一次联网检测</p>
         </div>
-        <div class="section-heading">
-          <h2>运行状态</h2>
-          <button id="refreshData" class="text-button">刷新</button>
+        <div
+          id="statusSummary"
+          class="group padded status-summary"
+          role="status"
+        >
+          <h2 id="statusConclusion">正在读取状态</h2>
+          <p id="statusExplanation" class="footnote"></p>
         </div>
-        <dl id="runtimeDetails" class="group detail-list"></dl>
+        <details class="section-disclosure">
+          <summary>运行详情</summary>
+          <div class="section-heading">
+            <h2>运行状态</h2>
+            <button id="refreshData" class="text-button">刷新</button>
+          </div>
+          <dl id="runtimeDetails" class="group detail-list"></dl>
+        </details>
         <div class="section-heading">
           <h2>联网检测</h2>
           <button id="dataCheck" class="text-button">重新检测</button>
         </div>
         <div id="connectivityResults" class="stack"></div>
-        <div class="section-heading">
-          <h2>环境诊断</h2>
-          <button id="doctor" class="text-button">开始诊断</button>
-        </div>
-        <div id="doctorResults" class="stack">
-          <p class="empty-note">诊断不会修改系统设置。</p>
-        </div>
-        <div class="section-heading">
-          <h2>内核日志</h2>
-          <button id="refreshLogs" class="text-button">刷新</button>
-        </div>
-        <pre id="logs" class="logs" tabindex="0">
+        <details class="section-disclosure">
+          <summary>诊断与日志</summary>
+          <div class="section-heading">
+            <h2>环境诊断</h2>
+            <button id="doctor" class="text-button">开始诊断</button>
+          </div>
+          <div id="doctorResults" class="stack">
+            <p class="empty-note">诊断不会修改系统设置。</p>
+          </div>
+          <div class="section-heading">
+            <h2>内核日志</h2>
+            <button id="refreshLogs" class="text-button">刷新</button>
+          </div>
+          <pre id="logs" class="logs" tabindex="0">
 点击刷新读取最近 200 行日志</pre
-        >
+          >
+        </details>
       </section>
       <section
         id="panel-settings"
@@ -235,7 +260,7 @@
       >
         <div class="page-heading">
           <h1>设置</h1>
-          <p>轻量、离线资源、原生窗口。</p>
+          <p>外观、网络与应用管理</p>
         </div>
         <div class="group">
           <label class="setting-row"
@@ -247,78 +272,115 @@
             </select></label
           >
         </div>
-        <div class="section-heading"><h2>代理设置</h2></div>
-        <form id="settingsForm" class="group form-group">
-          <label class="field"
-            ><span>HTTP / SOCKS5 端口</span
-            ><input name="mixedPort" type="number" min="1" max="65535" required
-          /></label>
-          <label class="setting-row"
-            ><span>允许局域网接入</span><input name="allowLAN" type="checkbox"
-          /></label>
-          <label class="setting-row"
-            ><span>TUN 虚拟网卡</span><input name="tunEnabled" type="checkbox"
-          /></label>
-          <p class="footnote">
-            开启 TUN 可能需要管理员权限。局域网接入会扩大代理入口的可访问范围。
+        <details class="section-disclosure">
+          <summary>
+            网络与代理 <span id="networkSummary" class="disclosure-meta"></span>
+          </summary>
+          <p id="compatibilityNotice" class="empty-note" role="alert" hidden>
+            当前后台版本较旧，已暂停设置保存以防覆盖其他配置。请在旧 CLI 执行
+            /shutdown，退出旧桌面，再启动新版。配置会保留。
           </p>
-          <label class="field"
-            ><span>内核下载代理</span
-            ><input
-              name="downloadProxy"
-              placeholder="留空直连 / system / http://127.0.0.1:端口"
-              autocomplete="off"
-          /></label>
-          <label class="field"
-            ><span>下载重试次数</span
-            ><input
-              name="downloadRetry"
-              type="number"
-              min="1"
-              max="10"
-              required
-          /></label>
-          <button class="button primary" type="submit">保存代理设置</button>
-        </form>
-        <div class="section-heading">
-          <h2>Mihomo 内核</h2>
-          <button id="installCore" class="text-button">安装 / 更新</button>
-        </div>
-        <div class="group padded">
-          <p id="installedCore" class="muted">正在读取内核信息</p>
-          <div class="actions">
-            <button id="coreStart" class="button small">启动</button
-            ><button id="coreRestart" class="button small">重启</button
-            ><button id="coreStop" class="button small">停止</button
-            ><button id="importCore" class="button small">本地导入</button>
+          <form id="settingsForm" class="group form-group">
+            <label class="field"
+              ><span>HTTP / SOCKS5 端口</span
+              ><input
+                name="mixedPort"
+                type="number"
+                min="1"
+                max="65535"
+                required
+            /></label>
+            <label class="setting-row"
+              ><span>允许局域网接入</span
+              ><input name="allowLAN" type="checkbox"
+            /></label>
+            <label class="setting-row"
+              ><span>TUN 虚拟网卡</span
+              ><input name="tunEnabled" type="checkbox"
+            /></label>
+            <p class="footnote">
+              开启 TUN
+              可能需要管理员权限。局域网接入会扩大代理入口的可访问范围。
+            </p>
+            <label class="field"
+              ><span>内核下载代理</span
+              ><input
+                name="downloadProxy"
+                placeholder="留空直连 / system / http://127.0.0.1:端口"
+                autocomplete="off"
+            /></label>
+            <label class="field"
+              ><span>下载重试次数</span
+              ><input
+                name="downloadRetry"
+                type="number"
+                min="1"
+                max="10"
+                required
+            /></label>
+            <button class="button primary" type="submit">保存代理设置</button>
+            <p id="settingsDraft" class="footnote" role="status"></p>
+            <button
+              id="reloadSettings"
+              class="text-button"
+              type="button"
+              hidden
+            >
+              放弃草稿并重新读取
+            </button>
+          </form>
+        </details>
+        <details class="section-disclosure" id="coreSection">
+          <summary>Mihomo 内核</summary>
+          <div class="section-heading">
+            <h2>Mihomo 内核</h2>
+            <button id="installCore" class="text-button">安装 / 更新</button>
           </div>
-          <div id="coreVersions" class="stack"></div>
-        </div>
-        <div class="section-heading">
-          <h2>Web 访问安全</h2>
-          <span id="webSecurityLabel" class="muted"></span>
-        </div>
-        <form id="tokenForm" class="group form-group">
-          <label class="field"
-            ><span>设置新 Token</span
-            ><input
-              name="token"
-              type="password"
-              placeholder="留空表示关闭 Web 鉴权"
-              autocomplete="new-password"
-          /></label>
-          <p class="footnote">
-            立即生效。桌面端自动读取新凭据，不向页面返回原 Token。
-          </p>
-          <button class="button" type="submit">更新访问 Token</button>
-        </form>
+          <div class="group padded">
+            <p id="installedCore" class="muted">正在读取内核信息</p>
+            <div class="actions">
+              <button id="coreStart" class="button small" data-mutation>
+                启动</button
+              ><button id="coreRestart" class="button small" data-mutation>
+                重启</button
+              ><button id="coreStop" class="button small" data-mutation>
+                停止</button
+              ><button id="importCore" class="button small" data-mutation>
+                本地导入
+              </button>
+            </div>
+            <div id="coreVersions" class="stack"></div>
+          </div>
+        </details>
+        <details class="section-disclosure">
+          <summary>Web 访问安全</summary>
+          <div class="section-heading">
+            <h2>Web 访问安全</h2>
+            <span id="webSecurityLabel" class="muted"></span>
+          </div>
+          <form id="tokenForm" class="group form-group">
+            <label class="field"
+              ><span>设置新 Token</span
+              ><input
+                name="token"
+                type="password"
+                placeholder="留空表示关闭 Web 鉴权"
+                autocomplete="new-password"
+            /></label>
+            <p class="footnote">
+              立即生效。桌面端自动读取新凭据，不向页面返回原 Token。
+            </p>
+            <button class="button" type="submit">更新访问 Token</button>
+          </form>
+        </details>
         <div class="section-heading"><h2>窗口与退出</h2></div>
         <div class="group padded">
           <p class="footnote">
-            点击窗口 ×
+            托盘就绪后，点击窗口 ×
             将隐藏到托盘，后台与代理继续运行。点击托盘可恢复窗口；真正退出请使用下面的退出按钮。
           </p>
           <p id="trayStatus" class="footnote" role="status">正在初始化托盘…</p>
+          <button id="retryTray" class="text-button" hidden>重试托盘</button>
           <div class="actions">
             <button id="hideWindow" class="button">隐藏到托盘</button>
             <button id="quit" class="button">退出桌面（保留代理）</button
@@ -362,7 +424,7 @@
         data-tab="data"
         tabindex="-1"
       >
-        <svg><use href="#i-data" /></svg><span>数据</span>
+        <svg><use href="#i-data" /></svg><span>状态</span>
       </button>
       <button
         id="tab-settings"
@@ -376,6 +438,10 @@
         <svg><use href="#i-settings" /></svg><span>设置</span>
       </button>
     </nav>
+    <div id="syncNotice" class="sync-notice" role="status" hidden>
+      <span id="syncMessage"></span
+      ><button id="retrySync" class="text-button">重试</button>
+    </div>
     <div id="toast" class="toast" role="status" hidden></div>
     <dialog id="dialog" aria-labelledby="dialogTitle">
       <div class="dialog-heading">

@@ -31,7 +31,7 @@ func TestTrayConnectionStateUsesLiveEvidence(t *testing.T) {
 		{"core only", true, func(o *app.Overview) { o.SystemProxy.State = "off" }, "idle", "仅内核运行"},
 		{"unknown", true, func(o *app.Overview) { o.SystemProxy.State = "unknown" }, "error", "未确认"},
 		{"fresh", true, func(o *app.Overview) {
-			o.Connectivity = &app.ConnectivityReport{CheckedAt: now, Routes: []app.ConnectivityRoute{{ID: "entry", State: "ok"}}}
+			o.Connectivity = &app.ConnectivityReport{CheckedAt: now, Routes: []app.ConnectivityRoute{{ID: "entry", State: "ok"}, {ID: "node", State: "ok"}}}
 		}, "good", "检测通过"},
 		{"old", true, func(o *app.Overview) {
 			o.Connectivity = &app.ConnectivityReport{CheckedAt: now.Add(-3 * time.Minute), Routes: []app.ConnectivityRoute{{ID: "entry", State: "ok"}}}

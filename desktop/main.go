@@ -15,6 +15,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/itrunswap/Kivo/desktop/internal/tray"
@@ -52,29 +53,36 @@ func (a desktopAssets) Open(name string) (fs.File, error) {
 
 // Desktop 只绑定有限的原生能力，不向 JavaScript 暴露配置 Store 或凭据。
 type Desktop struct {
-	ctx          context.Context
-	cancel       context.CancelFunc
-	bridge       *bridge.Bridge
-	mu           sync.RWMutex
-	starting     bool
-	ready        bool
-	startupError string
-	inflight     int
-	installMu    sync.Mutex
-	quitMu       sync.Mutex
-	windowMu     sync.Mutex // 串行化隐藏与恢复，避免托盘丢失回调先显示、随后又被隐藏。
-	quitting     bool
-	allowExit    bool
-	hidden       bool
-	tray         tray.Driver
-	trayReady    bool
-	trayStarting bool
-	trayError    string
-	trayView     tray.View
-	trayActions  chan tray.Action
-	trayWake     chan struct{}
-	smoke        bool
-	smokeOnce    sync.Once
+	ctx                context.Context
+	cancel             context.CancelFunc
+	bridge             *bridge.Bridge
+	mu                 sync.RWMutex
+	starting           bool
+	ready              bool
+	startupError       string
+	inflight           int
+	installMu          sync.Mutex
+	quitMu             sync.Mutex
+	windowMu           sync.Mutex // 串行化隐藏与恢复，避免托盘丢失回调先显示、随后又被隐藏。
+	quitting           bool
+	allowExit          bool
+	hidden             bool
+	tray               tray.Driver
+	trayReady          bool
+	trayStarting       bool
+	trayError          string
+	trayView           tray.View
+	trayActions        chan tray.Action
+	trayWake           chan struct{}
+	trayRetry          chan struct{}
+	overviewMu         sync.Mutex
+	overviewEpoch      atomic.Uint64
+	overviewGeneration uint64
+	overviewAt         time.Time
+	overviewReply      bridge.Reply
+	overviewPending    chan struct{}
+	smoke              bool
+	smokeOnce          sync.Once
 }
 
 // DesktopInfo 包含可恢复的后台启动状态。
@@ -96,6 +104,7 @@ func (d *Desktop) startup(ctx context.Context) {
 	ownContext := d.ctx
 	d.trayActions = make(chan tray.Action, 8)
 	d.trayWake = make(chan struct{}, 1)
+	d.trayRetry = make(chan struct{}, 1)
 	d.trayStarting = true
 	d.mu.Unlock()
 	go d.Reconnect()
@@ -177,8 +186,17 @@ func (d *Desktop) beginOperation() func() {
 	}
 	d.inflight++
 	d.mu.Unlock()
+	d.overviewEpoch.Add(1)
+	d.updateTrayBusy()
 	d.wakeTray()
-	return func() { d.mu.Lock(); d.inflight--; d.mu.Unlock(); d.wakeTray() }
+	return func() {
+		d.mu.Lock()
+		d.inflight--
+		d.mu.Unlock()
+		d.overviewEpoch.Add(1)
+		d.updateTrayBusy()
+		d.wakeTray()
+	}
 }
 
 // Reconnect 失败时保留窗口和错误提示，用户可修复配置后重试。
@@ -210,6 +228,7 @@ func (d *Desktop) Reconnect() string {
 	}
 	message := d.startupError
 	d.mu.Unlock()
+	d.overviewEpoch.Add(1)
 	return message
 }
 
@@ -228,6 +247,9 @@ func (d *Desktop) Info() DesktopInfo {
 
 // Request 将原生调用转发到受限的本机 API。
 func (d *Desktop) Request(method, path, body string) bridge.Reply {
+	if method == "GET" && path == "/api/v1/overview" {
+		return d.readOverview(d.ctx)
+	}
 	if method != "GET" {
 		done := d.beginOperation()
 		if done == nil {
@@ -308,8 +330,16 @@ func (d *Desktop) Quit(disconnect bool) string {
 	}
 	d.quitting = true
 	d.mu.Unlock()
+	d.updateTrayBusy()
 	d.wakeTray()
-	defer func() { d.mu.Lock(); d.quitting = false; d.mu.Unlock(); d.wakeTray() }()
+	defer func() {
+		d.mu.Lock()
+		d.quitting = false
+		d.mu.Unlock()
+		d.overviewEpoch.Add(1)
+		d.updateTrayBusy()
+		d.wakeTray()
+	}()
 	if disconnect {
 		result := d.bridge.Request(d.ctx, "POST", "/api/v1/connection/disconnect", "{}")
 		if result.Error != "" {

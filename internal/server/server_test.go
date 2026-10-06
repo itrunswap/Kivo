@@ -79,6 +79,40 @@ func TestHealthDoesNotRequireAuthorization(t *testing.T) {
 	}
 }
 
+func TestSettingsPartialPatchAndRevisionConflictHTTP(t *testing.T) {
+	controller, secret := newTestServer(t)
+	request := func(method, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, "/api/v1/settings", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+secret)
+		response := httptest.NewRecorder()
+		controller.handleAPI(response, req)
+		return response
+	}
+	var initial struct {
+		Data app.Settings `json:"data"`
+	}
+	if err := json.Unmarshal(request("GET", "").Body.Bytes(), &initial); err != nil {
+		t.Fatal(err)
+	}
+	if initial.Data.Revision == "" {
+		t.Fatal("settings revision missing")
+	}
+	if r := request("PATCH", `{"mode":"global"}`); r.Code != 200 {
+		t.Fatal(r.Code, r.Body.String())
+	}
+	var current struct {
+		Data app.Settings `json:"data"`
+	}
+	_ = json.Unmarshal(request("GET", "").Body.Bytes(), &current)
+	if current.Data.MixedPort != initial.Data.MixedPort || current.Data.Mode != "global" {
+		t.Fatal(current)
+	}
+	body, _ := json.Marshal(app.SettingsPatch{Revision: initial.Data.Revision})
+	if r := request("PATCH", string(body)); r.Code != 409 || !strings.Contains(r.Body.String(), "settings_conflict") {
+		t.Fatal(r.Code, r.Body.String())
+	}
+}
+
 func TestConnectivityAPIsRequireAuthAndGuideIsReadOnly(t *testing.T) {
 	controller, secret := newTestServer(t)
 	for _, tc := range []struct{ method, path string }{{http.MethodPost, "/api/v1/connectivity/check"}, {http.MethodGet, "/api/v1/proxy/setup"}} {

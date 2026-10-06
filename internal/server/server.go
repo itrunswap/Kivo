@@ -722,14 +722,18 @@ func (s *Server) handleCoreAction(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
-	var settings app.Settings
+	var settings app.SettingsPatch
 	if err := decodeJSON(r, &settings); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
-	if err := s.service.UpdateSettings(ctx, settings); err != nil {
+	if err := s.service.PatchSettings(ctx, settings); err != nil {
+		if errors.Is(err, app.ErrSettingsConflict) {
+			writeError(w, http.StatusConflict, "settings_conflict", err.Error())
+			return
+		}
 		writeAppError(w, err)
 		return
 	}

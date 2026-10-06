@@ -14,7 +14,7 @@ Kivo 使用 Go 开发，通过独立的 Mihomo 内核提供代理能力，负责
 
 桌面端采用 Go + Wails 2，使用系统 WebView，不附带 Chromium。紧凑单列提供首页、配置、数据、设置四个标签，和 CLI / Web 共用后台与配置。支持连接开关、真实联网状态、订阅及路由管理、节点选择 / 测速、带进度的内核安装和原生文件导入。
 
-Windows 本地桌面包位于 `dist/desktop/v0.3.1/kivo-desktop-windows-amd64.zip`，解压双击 `kivo-desktop.exe`。旧版包保留，不覆盖正在运行的程序。这不是下方已发布 CLI 包；Mac / Linux 使用单独原生构建流水线，完成实机验收再发布。托盘就绪后关闭窗口会驻留，点击托盘恢复、右键打开状态及操作菜单；明确区分“退出桌面（保留代理）”与“断开并退出”。详见[桌面端说明](docs/DESKTOP.md)。
+Windows 本地桌面包位于 `dist/desktop/v0.3.2/kivo-desktop-windows-amd64.zip`，解压双击 `kivo-desktop.exe`。旧版包保留，不覆盖正在运行的程序。这不是下方已发布 CLI 包；Mac / Linux 使用单独原生构建流水线，完成实机验收再发布。托盘就绪后关闭窗口会驻留，点击托盘恢复、右键打开状态及操作菜单；明确区分“退出桌面（保留代理）”与“断开并退出”。详见[桌面端说明](docs/DESKTOP.md)。
 
 ### CLI / Web 已发布版本
 

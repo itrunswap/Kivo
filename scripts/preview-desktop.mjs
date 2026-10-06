@@ -59,6 +59,7 @@ let running = true,
   connected = false,
   report = null;
 let settings = {
+  revision: "preview-1",
   listen: "127.0.0.1:19435",
   mixedPort: 17890,
   mode: "rule",
@@ -269,7 +270,9 @@ function api(method, uri, input) {
   }
   if (p === "/api/v1/settings") {
     if (method === "PATCH") {
-      settings = { ...input };
+      if (input.revision && input.revision !== settings.revision)
+        throw new Error("设置版本冲突，草稿已保留");
+      settings = { ...settings, ...input, revision: "preview-" + Date.now() };
       report = null;
     }
     return settings;
@@ -303,7 +306,7 @@ function api(method, uri, input) {
     ];
   throw new Error("未实现的模拟接口");
 }
-const bridge = `const events=new Map();window.runtime={EventsOn:(name,fn)=>events.set(name,fn)};window.go={main:{Desktop:{Info:async()=>({ready:true,version:'桌面交互演示',platform:'preview',architecture:'mock',dataDirectory:'内存数据，不读取真实配置',webURL:'',smokeTest:false,trayReady:false,trayStarting:false,trayError:'浏览器演示不提供系统托盘'}),HideWindow:async()=> '浏览器演示不能隐藏到系统托盘',Request:async(method,path,body)=>{const r=await fetch('/__preview/request',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({method,path,body:body?JSON.parse(body):{}})});return r.json();},SetTheme:()=>{},Reconnect:async()=>'',OpenWeb:async()=>'',Quit:async()=> '这是浏览器演示，不会退出真实后台',ImportCore:async()=>({status:204}),InstallCore:async()=>{for(let i=1;i<=5;i++){await new Promise(r=>setTimeout(r,200));events.get('core:progress')?.({stage:'download',message:'演示下载进度（不下载真实内核）',downloaded:i*200,total:1000,bytesPerSecond:1000});}return '';}}}};document.addEventListener('DOMContentLoaded',()=>{document.querySelector('.wordmark').append(document.createTextNode(' · 演示'));});`;
+const bridge = `const events=new Map();window.runtime={EventsOn:(name,fn)=>events.set(name,fn)};window.go={main:{Desktop:{Info:async()=>({ready:true,version:'桌面交互演示',platform:'preview',architecture:'mock',dataDirectory:'内存数据，不读取真实配置',webURL:'',smokeTest:false,trayReady:false,trayStarting:false,trayError:'浏览器演示不提供系统托盘'}),RetryTray:async()=> '浏览器演示不提供原生托盘',HideWindow:async()=> '浏览器演示不能隐藏到系统托盘',Request:async(method,path,body)=>{const r=await fetch('/__preview/request',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({method,path,body:body?JSON.parse(body):{}})});return r.json();},SetTheme:()=>{},Reconnect:async()=>'',OpenWeb:async()=>'',Quit:async()=> '这是浏览器演示，不会退出真实后台',ImportCore:async()=>({status:204}),InstallCore:async()=>{for(let i=1;i<=5;i++){await new Promise(r=>setTimeout(r,200));events.get('core:progress')?.({stage:'download',message:'演示下载进度（不下载真实内核）',downloaded:i*200,total:1000,bytesPerSecond:1000});}return '';}}}};document.addEventListener('DOMContentLoaded',()=>{document.querySelector('.wordmark').append(document.createTextNode(' · 演示'));});`;
 http
   .createServer(async (req, res) => {
     try {
@@ -337,6 +340,7 @@ http
         "/": "desktop/frontend/index.html",
         "/app.js": "desktop/frontend/app.js",
         "/model.mjs": "desktop/frontend/model.mjs",
+        "/sync.mjs": "desktop/frontend/sync.mjs",
         "/app.css": "desktop/frontend/app.css",
         "/fonts/noto-sans-sc-ui.woff2":
           "internal/server/assets/fonts/noto-sans-sc-ui.woff2",

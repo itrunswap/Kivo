@@ -51,6 +51,7 @@ func (s *Service) ProxySetup() platform.ProxyGuide {
 
 // Overview 是控制台首页需要的聚合数据。
 type Overview struct {
+	Display            ConnectionDisplay          `json:"display"`
 	Connection         ConnectionSummary          `json:"connection"`
 	Connectivity       *ConnectivityReport        `json:"connectivity,omitempty"`
 	Core               core.Status                `json:"core"`
@@ -91,6 +92,7 @@ func (s *Service) Overview(ctx context.Context) Overview {
 	}
 	overview.Connectivity = s.cachedConnectivity(status)
 	overview.Connection = SummarizeConnection(overview)
+	overview.Display = DisplayConnection(overview, time.Now())
 	return overview
 }
 
@@ -364,6 +366,7 @@ func (s *Service) Logs(limit int) []string { return s.core.Logs(limit) }
 
 // Settings 是允许通过控制台修改的非敏感设置。
 type Settings struct {
+	Revision      string `json:"revision,omitempty"`
 	Listen        string `json:"listen"`
 	MixedPort     int    `json:"mixedPort"`
 	Mode          string `json:"mode"`
@@ -397,8 +400,7 @@ func (s *Service) UpdateWebToken(token string) (WebSecurity, error) {
 
 // GetSettings 返回公开设置。
 func (s *Service) GetSettings() Settings {
-	cfg := s.store.Snapshot()
-	return Settings{Listen: cfg.Web.Listen, MixedPort: cfg.Mihomo.MixedPort, Mode: cfg.Mihomo.Mode, AllowLAN: cfg.Mihomo.AllowLAN, TUNEnabled: cfg.Mihomo.TUNEnabled, DownloadProxy: cfg.Mihomo.DownloadProxy, DownloadRetry: cfg.Mihomo.DownloadRetry}
+	return publicSettings(s.store.Snapshot())
 }
 
 // UpdateSettings 更新设置。涉及端口或 TUN 的变更会重启运行中的内核。
@@ -408,6 +410,14 @@ func (s *Service) UpdateSettings(ctx context.Context, settings Settings) error {
 	}
 	defer s.subscriptionAction.Unlock()
 	current := s.store.Snapshot()
+	if settings.Revision != "" && settings.Revision != publicSettings(current).Revision {
+		return ErrSettingsConflict
+	}
+	return s.updateSettingsLocked(ctx, settings, current)
+}
+
+// updateSettingsLocked 的调用方持有业务事务锁，校验、合并与应用使用同一份配置。
+func (s *Service) updateSettingsLocked(ctx context.Context, settings Settings, current config.Config) error {
 	if settings.DownloadRetry == 0 {
 		settings.DownloadRetry = current.Mihomo.DownloadRetry
 	}

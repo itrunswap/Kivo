@@ -98,7 +98,7 @@ func IconPNG(tone string) []byte {
 		badge = color.NRGBA{34, 197, 94, 255}
 	case "error":
 		badge = color.NRGBA{239, 68, 68, 255}
-	case "busy":
+	case "busy", "warn":
 		badge = color.NRGBA{245, 158, 11, 255}
 	}
 	for y := 2; y < 30; y++ {

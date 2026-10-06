@@ -8,6 +8,7 @@ import {
   selectedNode,
   updateSummary,
 } from "./model.mjs";
+import { RefreshGate, affectedResources } from "./sync.mjs";
 
 // 页面只通过受限原生桥调用后台；没有跨域网络请求，也不持有 Web Token。
 const $ = (id) => document.getElementById(id);
@@ -28,7 +29,15 @@ const state = {
   security: null,
   openGroups: new Set(),
   loadedGroups: false,
+  scroll: {},
+  changed: new Set(),
+  draft: null,
+  dirty: false,
+  phase: "",
+  nodeRows: new Map(),
+  nodeGroups: new Map(),
 };
+const gate = new RefreshGate();
 let toastTimer, lastFocus;
 const native = () => window.go?.main?.Desktop;
 
@@ -40,6 +49,8 @@ function renderTray() {
       ? "正在初始化托盘，请稍候…"
       : state.info?.trayError || "托盘不可用，关闭窗口将退出界面，后台仍保留。";
   $("hideWindow").disabled = !state.info?.trayReady || state.busy;
+  $("retryTray").hidden = !!state.info?.trayReady;
+  $("retryTray").disabled = !!state.info?.trayStarting;
 }
 
 function element(tag, className, text) {
@@ -47,6 +58,12 @@ function element(tag, className, text) {
   if (className) result.className = className;
   if (text != null) result.textContent = text;
   return result;
+}
+
+// 文本未变时不替换文本节点，减少轮询对辅助阅读和文本选择的干扰。
+function setText(target, value) {
+  const text = String(value ?? "");
+  if (target.textContent !== text) target.textContent = text;
 }
 function icon(name) {
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
@@ -75,6 +92,8 @@ function message(text, error = false) {
 }
 async function reply(path, method = "GET", body) {
   if (!native()) throw new Error("原生连接未就绪，请在 Kivo 桌面窗口中运行");
+  if (method !== "GET")
+    affectedResources(path).forEach((key) => state.changed.add(key));
   return native().Request(
     method,
     path,
@@ -82,6 +101,15 @@ async function reply(path, method = "GET", body) {
   );
 }
 async function api(path, method = "GET", body) {
+  // 旧后台按完整对象覆盖设置，不能把新的局部 PATCH 发给旧实现。
+  if (
+    method === "PATCH" &&
+    path === "/api/v1/settings" &&
+    !state.settings?.revision
+  )
+    throw new Error(
+      "后台版本过旧或设置尚未读取，暂不能安全保存。请退出旧后台，再启动新版桌面。",
+    );
   const result = await reply(path, method, body);
   if (result.error || result.status >= 400) {
     const err = new Error(result.error || `操作失败（${result.status}）`);
@@ -91,25 +119,48 @@ async function api(path, method = "GET", body) {
   return result.data;
 }
 function startJob(label) {
+  gate.invalidate();
+  state.changed.clear();
   state.busy = true;
   $("job").hidden = false;
   $("jobLabel").textContent = label;
   $("jobDetail").textContent = "";
   $("jobPercent").textContent = "";
   $("jobProgress").removeAttribute("value");
-  document
-    .querySelectorAll("[data-mutation]")
-    .forEach((item) => (item.disabled = true));
-  $("connect").disabled = true;
+  updateAvailability();
 }
 function endJob() {
   state.busy = false;
+  state.phase = "";
   $("job").hidden = true;
-  document
-    .querySelectorAll("[data-mutation]")
-    .forEach((item) => (item.disabled = false));
   renderOverview();
-  renderNodes(true); // 忙碌状态解除后仍保留离线、缓存和禁用订阅的节点限制。
+  updateAvailability();
+}
+
+// 忙碌只改变控件状态，不删除列表；原有业务禁用条件单独保存。
+function updateAvailability() {
+  document.querySelectorAll("[data-mutation]").forEach((item) => {
+    item.disabled = state.busy || item.dataset.blocked === "true";
+  });
+  for (const row of state.nodeRows.values()) {
+    row.choose.disabled =
+      state.busy ||
+      !state.online ||
+      !state.nodesFresh ||
+      state.overview?.core?.state !== "running" ||
+      row.node.cached ||
+      !row.enabled;
+  }
+  $("connect").disabled =
+    state.busy ||
+    !state.online ||
+    state.overview?.systemProxy?.supported === false;
+  renderTray();
+}
+
+async function refreshChanged() {
+  gate.invalidate();
+  return refreshResources([...state.changed]);
 }
 // 所有变更串行执行；后台同样有事务锁，避免多窗口改写内核或订阅。
 async function perform(
@@ -123,12 +174,22 @@ async function perform(
   }
   startJob(label);
   try {
-    await operation();
-    if (refresh) await refreshAll();
-    if (success) message(success);
+    const result = await operation();
+    const failures = refresh ? await refreshChanged() : [];
+    const notice = result?.warning ? result.message : success;
+    if (notice || failures.length)
+      message(
+        [
+          notice,
+          failures.length ? "操作已生效；部分状态暂未刷新，可点击重试" : "",
+        ]
+          .filter(Boolean)
+          .join("。"),
+        !!result?.warning || failures.length > 0,
+      );
     return true;
   } catch (error) {
-    if (refresh) await refreshAll().catch(() => {});
+    if (refresh) await refreshChanged().catch(() => {});
     message(error.message, true);
     return false;
   } finally {
@@ -252,8 +313,11 @@ async function mutate(label, path, method, body) {
   startJob(label);
   try {
     const result = await api(path, method, body);
-    await refreshAll();
-    message("已保存");
+    const failures = await refreshChanged();
+    message(
+      failures.length ? "已保存；部分状态暂未刷新，可点击重试" : "已保存",
+      failures.length > 0,
+    );
     return result;
   } finally {
     endJob();
@@ -262,6 +326,27 @@ async function mutate(label, path, method, body) {
 
 function renderOverview() {
   const view = connectionView(state.overview, state.online);
+  if (state.phase) {
+    const attached =
+      state.overview?.systemProxy?.state === "this_app" &&
+      state.overview?.proxyPortListening;
+    view.title =
+      state.phase === "disconnect"
+        ? "正在断开…"
+        : attached
+          ? "已接入 · 正在检测…"
+          : "正在连接…";
+    view.detail =
+      state.phase === "disconnect"
+        ? "恢复系统代理并停止内核"
+        : "验证代理入口与联网情况";
+    view.tone = "busy";
+  }
+  $("currentNode").textContent =
+    state.overview?.core?.currentNode || "尚未选择节点";
+  $("currentNode").title = state.overview?.core?.currentNode || "";
+  $("connect").classList.toggle("pending", !!state.phase);
+  $("connect").setAttribute("aria-busy", String(!!state.phase));
   $("connectionTitle").textContent = view.title;
   $("connectionDetail").textContent = view.detail;
   $("connectionDot").className = `status-dot ${view.tone}`;
@@ -289,7 +374,7 @@ function renderOverview() {
     ? `HTTP / SOCKS5 · 127.0.0.1:${core.mixedPort} · ${state.online && state.overview.proxyPortListening ? "正在监听" : "未确认监听"}`
     : "HTTP / SOCKS5 · —";
   const hint = state.overview?.systemProxy?.recoveryPending
-    ? "存在未恢复系统代理备份，请到数据页查看状态，再在设置页恢复。"
+    ? "存在未恢复系统代理备份，请到状态页查看，再在设置页恢复。"
     : core?.state === "not_installed"
       ? "首次使用：安装内核 → 添加并更新订阅 → 选择节点 → 打开连接。"
       : core?.state === "running" && !view.on
@@ -304,119 +389,146 @@ function renderOverview() {
     ? `最近检测 ${new Date(report.checkedAt).toLocaleTimeString("zh-CN", { hour12: false })} · ${fresh(report) ? "结果有效 2 分钟" : "结果已过期"}`
     : "连接状态不代表联网成功，请运行连通测试";
 }
-function renderNodes(force = false) {
-  const viewKey = JSON.stringify([
-    state.nodes,
-    state.nodesFresh,
-    state.subs,
-    $("nodeSearch").value,
-    state.online,
-    state.busy,
-    state.overview?.core?.state,
-    state.overview?.core?.currentNode,
-  ]);
-  if (!force && state.nodeViewKey === viewKey) return; // 相同轮询结果不重建 DOM，不丢失键盘焦点或折叠状态。
-  state.nodeViewKey = viewKey;
-  const groups = groupNodes(state.nodes, state.subs, $("nodeSearch").value),
-    container = $("nodeGroups");
-  container.replaceChildren();
+// 只移动/更新发生变化的元素，保留 details、焦点和滚动锚点。
+function reconcileChildren(parent, children) {
+  const wanted = new Set(children);
+  for (const child of [...parent.children])
+    if (!wanted.has(child)) child.remove();
+  children.forEach((child, index) => {
+    if (parent.children[index] !== child)
+      parent.insertBefore(child, parent.children[index] || null);
+  });
+}
+function renderNodes() {
+  const groups = groupNodes(state.nodes, state.subs, $("nodeSearch").value);
   const running =
     state.online &&
     state.nodesFresh &&
     state.overview?.core?.state === "running";
+  const usedRows = new Set(),
+    usedGroups = new Set(),
+    groupElements = [];
   if (!state.loadedGroups && groups.length) {
-    if (groups[0]) state.openGroups.add(groups[0].name);
+    state.openGroups.add(groups[0].name);
     state.loadedGroups = true;
   }
-  if (!groups.length) {
-    container.append(
-      element(
-        "p",
-        "empty-note",
-        $("nodeSearch").value
-          ? "没有匹配的节点"
-          : "尚无订阅。点击右上角 + 添加订阅。",
-      ),
-    );
-    return;
-  }
   for (const group of groups) {
-    const details = element("details", "node-group"),
-      summary = element("summary");
-    details.open = state.openGroups.has(group.name) || !!$("nodeSearch").value;
-    summary.append(
-      icon("chevron"),
-      element("strong", "", group.name),
-      element(
-        "span",
-        "count",
-        `${group.nodes.length} 个节点${group.enabled ? "" : " · 已禁用"}`,
-      ),
+    usedGroups.add(group.name);
+    let entry = state.nodeGroups.get(group.name);
+    if (!entry) {
+      const root = element("details", "node-group"),
+        summary = element("summary"),
+        name = element("strong"),
+        count = element("span", "count");
+      summary.append(icon("chevron"), name, count);
+      root.append(summary);
+      entry = { root, summary, name, count, limit: 80 };
+      root.addEventListener("toggle", () => {
+        if (root.open) state.openGroups.add(group.name);
+        else state.openGroups.delete(group.name);
+      });
+      state.nodeGroups.set(group.name, entry);
+    }
+    setText(entry.name, group.name);
+    setText(
+      entry.count,
+      group.nodes.length + " 个节点" + (group.enabled ? "" : " · 已禁用"),
     );
-    details.append(summary);
-    details.addEventListener("toggle", () => {
-      if (details.open) state.openGroups.add(group.name);
-      else state.openGroups.delete(group.name);
-    });
-    if (!group.nodes.length)
-      details.append(
-        element(
-          "p",
-          "empty-note",
-          group.enabled
-            ? "尚无节点。请更新此订阅，查看结果中的解析数量。"
-            : "此订阅已禁用",
-        ),
+    const open = state.openGroups.has(group.name) || !!$("nodeSearch").value;
+    if (entry.root.open !== open) entry.root.open = open;
+    const rows = [entry.summary];
+    for (const node of group.nodes.slice(0, entry.limit)) {
+      const key = JSON.stringify([group.name, node.name]);
+      usedRows.add(key);
+      let row = state.nodeRows.get(key);
+      if (!row) {
+        const root = element("div", "node-row"),
+          name = element("span", "node-name"),
+          type = element("span", "node-type"),
+          copy = element("span", "node-copy");
+        row = { root, name, type, node, enabled: group.enabled };
+        const item = row;
+        row.choose = button(
+          "",
+          () =>
+            perform(
+              "正在切换节点…",
+              () =>
+                api("/api/v1/nodes/select", "POST", { name: item.node.name }),
+              { success: "节点已切换" },
+            ),
+          "node-select",
+        );
+        row.choose.dataset.mutation = "true";
+        copy.append(name, type);
+        row.choose.append(element("span", "radio"), copy);
+        row.delay = element("span", "delay");
+        row.info = button("", () => nodeDetail(item.node), "icon-button");
+        row.info.append(icon("info"));
+        root.append(row.choose, row.delay, row.info);
+        state.nodeRows.set(key, row);
+      }
+      row.node = node;
+      row.enabled = group.enabled;
+      row.root.classList.toggle("selected", selectedNode(state.overview, node));
+      setText(row.name, node.name);
+      setText(
+        row.type,
+        (node.type || "Proxy") + (node.cached ? " · 离线快照" : ""),
       );
-    for (const node of group.nodes) {
-      const row = element(
-        "div",
-        `node-row${selectedNode(state.overview, node) ? " selected" : ""}`,
-      );
-      const choose = button(
-        "",
-        () =>
-          perform(
-            "正在切换节点…",
-            () => api("/api/v1/nodes/select", "POST", { name: node.name }),
-            { success: "节点已切换，建议重新检测联网" },
-          ),
-        "node-select",
-      );
-      choose.disabled = !running || node.cached || !group.enabled || state.busy;
-      choose.dataset.mutation = "true";
-      choose.setAttribute("aria-label", `选择 ${node.name}`);
-      choose.setAttribute(
+      row.choose.setAttribute("aria-label", "选择 " + node.name);
+      row.choose.setAttribute(
         "aria-pressed",
         String(selectedNode(state.overview, node)),
       );
-      const copy = element("span", "node-copy");
-      copy.append(
-        element("span", "node-name", node.name),
-        element(
-          "span",
-          "node-type",
-          `${node.type || "Proxy"}${node.cached ? " · 离线快照" : ""}`,
-        ),
-      );
-      choose.append(element("span", "radio"), copy);
-      const delay = nodeLatency(node, running);
-      row.append(choose, element("span", `delay ${delay.tone}`, delay.text));
-      const info = button("", () => nodeDetail(node), "icon-button");
-      info.append(icon("info"));
-      info.setAttribute("aria-label", `${node.name} 的详细信息`);
-      row.append(info);
-      details.append(row);
+      row.info.setAttribute("aria-label", node.name + " 的详细信息");
+      const latency = nodeLatency(node, running);
+      setText(row.delay, latency.text);
+      row.delay.className = "delay " + latency.tone;
+      rows.push(row.root);
     }
-    container.append(details);
+    if (group.nodes.length > entry.limit) {
+      if (!entry.more)
+        entry.more = button(
+          "显示更多节点",
+          () => {
+            entry.limit += 80;
+            renderNodes();
+          },
+          "load-more",
+        );
+      rows.push(entry.more);
+    }
+    if (!group.nodes.length) {
+      if (!entry.empty) entry.empty = element("p", "empty-note");
+      entry.empty.textContent = group.enabled
+        ? "尚无节点，请更新订阅。"
+        : "此订阅已禁用";
+      rows.push(entry.empty);
+    }
+    reconcileChildren(entry.root, rows);
+    groupElements.push(entry.root);
   }
+  if (!groups.length) {
+    if (!state.nodeEmpty) state.nodeEmpty = element("p", "empty-note");
+    state.nodeEmpty.textContent = $("nodeSearch").value
+      ? "没有匹配的节点"
+      : "尚无订阅。点击右上角 + 添加订阅。";
+    groupElements.push(state.nodeEmpty);
+  }
+  reconcileChildren($("nodeGroups"), groupElements);
+  for (const key of state.nodeRows.keys())
+    if (!usedRows.has(key)) state.nodeRows.delete(key);
+  for (const key of state.nodeGroups.keys())
+    if (!usedGroups.has(key)) state.nodeGroups.delete(key);
   $("nodesNotice").textContent = !state.online
-    ? "后台已断开，节点列表是上次读取结果，不能切换。"
+    ? "后台已断开，旧节点仅供查看"
     : !state.nodesFresh
-      ? "节点列表未能刷新，旧节点仅供查看，请重试。"
+      ? "节点暂未刷新，旧结果仅供查看"
       : !running
-        ? "内核已停止。缓存节点仅供查看，启动内核后才能切换和测速。"
-        : `${state.nodes.length} 个节点 · ${state.subs.filter((sub) => sub.enabled).length} 个已启用订阅`;
+        ? "内核已停止；连接后可选择节点"
+        : state.nodes.length + " 个节点";
+  updateAvailability();
 }
 function nodeDetail(node) {
   const body = dialog("节点信息");
@@ -461,6 +573,7 @@ function detailsList(items) {
 function record(title, subtitle, badge = "", active = false) {
   const card = element("div", "record"),
     top = element("div", "record-top");
+  card.dataset.key = title;
   top.append(element("strong", "", title));
   if (badge)
     top.append(element("span", `badge${active ? " active" : ""}`, badge));
@@ -468,19 +581,55 @@ function record(title, subtitle, badge = "", active = false) {
   if (subtitle) card.append(element("p", "", subtitle));
   return card;
 }
+function reconcileCards(parent, cards) {
+  const previous = new Map(
+    [...parent.children].map((card) => [card.dataset.key, card]),
+  );
+  const next = cards.map((card) => {
+    const old = previous.get(card.dataset.key);
+    return old && old.dataset.revision === card.dataset.revision ? old : card;
+  });
+  const active = document.activeElement;
+  const focusKey = active?.closest?.("[data-key]")?.dataset.key;
+  const slot = active?.dataset.slot;
+  reconcileChildren(parent, next);
+  if (focusKey && slot != null && !active.isConnected)
+    next
+      .find((card) => card.dataset.key === focusKey)
+      ?.querySelector('[data-slot="' + slot + '"]')
+      ?.focus();
+}
 function actionRow(card, items) {
   const actions = element("div", "actions");
-  for (const [label, action, danger] of items) {
-    const b = button(label, action, `button small${danger ? " danger" : ""}`);
+  const more = element("details", "more-actions"),
+    menu = element("div", "more-menu");
+  more.append(element("summary", "button small", "更多"), menu);
+  for (const [index, [label, action, danger, blocked]] of items.entries()) {
+    const b = button(
+      label,
+      () => {
+        more.open = false;
+        action();
+      },
+      `button small${danger ? " danger" : ""}`,
+    );
     b.dataset.mutation = "true";
-    actions.append(b);
+    b.dataset.slot = String(index);
+    b.dataset.blocked = String(!!blocked);
+    b.disabled = state.busy || !!blocked;
+    (items.length > 3 && !["更新", "更新组", "启用", "禁用"].includes(label)
+      ? menu
+      : actions
+    ).append(b);
   }
+  if (menu.children.length) actions.append(more);
   card.append(actions);
 }
 function renderConfig() {
-  $("subscriptions").replaceChildren();
+  const staged = {};
+  staged.subscriptions = element("div");
   if (!state.subs.length)
-    $("subscriptions").append(
+    staged.subscriptions.append(
       element(
         "p",
         "empty-note",
@@ -527,9 +676,10 @@ function renderConfig() {
         true,
       ],
     ]);
-    $("subscriptions").append(card);
+    card.dataset.revision = JSON.stringify(sub);
+    staged.subscriptions.append(card);
   }
-  $("subscriptionGroups").replaceChildren();
+  staged.subscriptionGroups = element("div");
   for (const group of state.groups) {
     const card = record(
       group.name,
@@ -578,9 +728,10 @@ function renderConfig() {
         true,
       ],
     ]);
-    $("subscriptionGroups").append(card);
+    card.dataset.revision = JSON.stringify(group);
+    staged.subscriptionGroups.append(card);
   }
-  $("profiles").replaceChildren();
+  staged.profiles = element("div");
   for (const profile of state.routing?.profiles || []) {
     const active = state.routing.activeProfile === profile.name;
     const card = record(
@@ -617,9 +768,10 @@ function renderConfig() {
         true,
       ],
     ]);
-    $("profiles").append(card);
+    card.dataset.revision = JSON.stringify(profile);
+    staged.profiles.append(card);
   }
-  $("ruleGroups").replaceChildren();
+  staged.ruleGroups = element("div");
   for (const group of state.routing?.ruleGroups || []) {
     const card = record(group.name, `${group.rules?.length || 0} 条规则`);
     actionRow(card, [
@@ -644,10 +796,26 @@ function renderConfig() {
         true,
       ],
     ]);
-    $("ruleGroups").append(card);
+    card.dataset.revision = JSON.stringify(group);
+    staged.ruleGroups.append(card);
   }
+  for (const [id, container] of Object.entries(staged))
+    reconcileCards($(id), [...container.children]);
 }
 function renderData() {
+  const view = connectionView(state.overview, state.online);
+  $("statusConclusion").textContent = view.title;
+  $("statusExplanation").textContent = state.online
+    ? state.overview?.connection?.detail || view.detail
+    : view.detail;
+  $("statusSummary").dataset.tone = view.tone;
+  const key = JSON.stringify([
+    state.overview,
+    state.online,
+    fresh(state.overview?.connectivity),
+  ]);
+  if (state.dataKey === key) return;
+  state.dataKey = key;
   const o = state.overview,
     c = o?.core,
     p = o?.systemProxy;
@@ -721,7 +889,14 @@ function renderData() {
 }
 function renderSettings(preserveForm = false) {
   renderTray();
+  setText(
+    $("networkSummary"),
+    state.settings ? "端口 " + state.settings.mixedPort : "未读取",
+  );
+  $("compatibilityNotice").hidden =
+    !state.settings || !!state.settings.revision;
   if (state.settings && !preserveForm) {
+    state.draft = { ...state.settings };
     const form = $("settingsForm");
     for (const name of [
       "mixedPort",
@@ -731,16 +906,32 @@ function renderSettings(preserveForm = false) {
       "downloadRetry",
     ]) {
       const control = form.elements.namedItem(name);
+      if (!control) continue;
       if (control.type === "checkbox") control.checked = !!state.settings[name];
       else control.value = state.settings[name] ?? "";
     }
   }
+  $("settingsDraft").textContent = state.dirty
+    ? state.settings?.revision !== state.draft?.revision
+      ? "其他客户端已修改设置。当前草稿已保留；重新读取后再保存。"
+      : "有未保存的修改"
+    : "与后台设置同步";
+  $("reloadSettings").hidden = !state.dirty;
+  $("coreStart").dataset.blocked = String(
+    state.overview?.core?.state === "running",
+  );
+  $("coreStop").dataset.blocked = String(
+    state.overview?.core?.state !== "running",
+  );
+  $("coreRestart").dataset.blocked = String(
+    state.overview?.core?.state === "not_installed",
+  );
   $("installedCore").textContent =
     `${state.overview?.core?.version || "尚未安装"} · ${coreStates[state.overview?.core?.state] || "状态未知"}`;
   $("webSecurityLabel").textContent = state.security?.authEnabled
     ? "已开启 Token"
     : "无需 Token";
-  $("coreVersions").replaceChildren();
+  const versionsStage = element("div");
   for (const item of state.versions) {
     const row = record(
       item.version,
@@ -755,6 +946,8 @@ function renderSettings(preserveForm = false) {
           perform("切换内核…", () =>
             api("/api/v1/core/use", "POST", { reference: item.version }),
           ),
+        false,
+        item.active,
       ],
       [
         "删除",
@@ -773,11 +966,13 @@ function renderSettings(preserveForm = false) {
             true,
           ),
         true,
+        item.active,
       ],
     ]);
-    $("coreVersions").append(row);
+    row.dataset.revision = JSON.stringify(item);
+    versionsStage.append(row);
   }
-  if (state.overview?.systemProxy?.recoveryPending && !$("recoverProxy")) {
+  if (state.overview?.systemProxy?.recoveryPending) {
     const b = button(
       "恢复系统代理备份",
       () =>
@@ -792,8 +987,11 @@ function renderSettings(preserveForm = false) {
       "button danger",
     );
     b.id = "recoverProxy";
-    $("coreVersions").append(b);
+    b.dataset.key = "recover";
+    b.dataset.revision = "recover";
+    versionsStage.append(b);
   }
+  reconcileCards($("coreVersions"), [...versionsStage.children]);
   $("appInfo").textContent = state.info
     ? `Kivo ${state.info.version} · ${state.info.platform} / ${state.info.architecture}`
     : "Kivo Desktop";
@@ -802,49 +1000,100 @@ function renderSettings(preserveForm = false) {
     : "";
 }
 
-async function refreshOverview() {
-  state.overview = await api("/api/v1/overview");
-  state.online = true;
-  $("connectionAlert").hidden = true;
-  renderOverview();
-  renderData();
+const resources = {
+  overview: "/overview",
+  nodes: "/nodes",
+  subs: "/subscriptions",
+  groups: "/subscription-groups",
+  routing: "/routing",
+  settings: "/settings",
+  versions: "/core/installations",
+  security: "/web/security",
+};
+const resourceNames = {
+  overview: "运行状态",
+  nodes: "节点",
+  subs: "订阅",
+  groups: "订阅分组",
+  routing: "路由",
+  settings: "设置",
+  versions: "内核版本",
+  security: "Web 安全",
+};
+const resourceErrors = new Map();
+
+function renderSyncErrors() {
+  $("syncNotice").hidden = resourceErrors.size === 0;
+  $("syncMessage").textContent =
+    [...resourceErrors.keys()].map((key) => resourceNames[key]).join("、") +
+    "暂未刷新，保留上次结果";
 }
-async function refreshAll({ preserveSettings = false } = {}) {
+async function readResource(key) {
+  const ticket = gate.begin(key);
   try {
-    await refreshOverview();
+    const value = await api("/api/v1" + resources[key]);
+    if (!gate.current(ticket)) return false;
+    state[key] =
+      value ??
+      (["nodes", "subs", "groups", "versions"].includes(key) ? [] : null);
+    resourceErrors.delete(key);
+    if (key === "overview") {
+      state.online = true;
+      $("connectionAlert").hidden = true;
+    }
+    if (key === "nodes") state.nodesFresh = true;
+    return true;
   } catch (error) {
-    state.online = false;
-    $("connectionAlert").hidden = false;
-    $("backendMessage").textContent = error.message;
-    renderOverview();
-    renderNodes();
+    if (!gate.current(ticket)) return false;
+    resourceErrors.set(key, error.message);
+    if (key === "overview") {
+      state.online = false;
+      $("connectionAlert").hidden = false;
+      $("backendMessage").textContent = error.message;
+    }
+    if (key === "nodes") state.nodesFresh = false;
     throw error;
   }
-  const requests = [
-    ["nodes", "/nodes"],
-    ["subs", "/subscriptions"],
-    ["groups", "/subscription-groups"],
-    ["routing", "/routing"],
-    ["settings", "/settings"],
-    ["versions", "/core/installations"],
-    ["security", "/web/security"],
-  ];
-  state.nodesFresh = false;
-  const results = await Promise.allSettled(
-    requests.map(async ([key, path]) => {
-      state[key] =
-        (await api("/api/v1" + path)) ??
-        (["nodes", "subs", "groups", "versions"].includes(key) ? [] : null);
-      if (key === "nodes") state.nodesFresh = true;
-    }),
-  );
-  const failed = results.find((item) => item.status === "rejected");
-  renderNodes();
-  renderConfig();
-  renderSettings(preserveSettings);
-  if (failed) message(`部分信息未加载：${failed.reason.message}`, true);
 }
+// 各资源独立提交结果，局部失败不会伪装成后台断开；渲染保持当前草稿和滚动。
+async function refreshResources(keys) {
+  const selected = [...new Set(keys)].filter((key) => resources[key]);
+  const results = await Promise.allSettled(selected.map(readResource));
+  const changed = selected.filter(
+    (key, index) =>
+      results[index].status === "fulfilled" && results[index].value,
+  );
+  if (selected.includes("overview")) {
+    renderOverview();
+    renderData();
+  }
+  if (selected.some((key) => ["overview", "nodes", "subs"].includes(key)))
+    renderNodes();
+  if (changed.some((key) => ["subs", "groups", "routing"].includes(key)))
+    renderConfig();
+  if (
+    selected.some((key) =>
+      ["overview", "settings", "versions", "security"].includes(key),
+    )
+  )
+    renderSettings(state.dirty);
+  renderSyncErrors();
+  updateAvailability();
+  return selected.filter((key, index) => results[index].status === "rejected");
+}
+async function refreshOverview() {
+  return refreshResources(["overview"]);
+}
+async function refreshAll() {
+  return refreshResources(Object.keys(resources));
+}
+
 function setTab(tab, focus = false) {
+  const content = $("content");
+  const changed = tab !== state.tab;
+  if (changed) {
+    state.scroll[state.tab] = content.scrollTop;
+  }
   state.tab = tab;
   for (const b of document.querySelectorAll("[data-tab]")) {
     const active = b.dataset.tab === tab;
@@ -854,19 +1103,18 @@ function setTab(tab, focus = false) {
     $("panel-" + b.dataset.tab).hidden = !active;
     if (active && focus) b.focus();
   }
-  $("content").scrollTop = 0;
-  if (
-    (tab === "settings" || tab === "config") &&
-    state.online &&
-    !state.busy &&
-    !state.refreshing
-  ) {
+  if (changed) content.scrollTop = state.scroll[tab] || 0;
+  const keys =
+    tab === "settings"
+      ? ["settings", "versions", "security"]
+      : tab === "config"
+        ? ["subs", "groups", "routing"]
+        : [];
+  if (state.online && !state.busy && !state.refreshing && keys.length) {
     state.refreshing = true;
-    refreshAll()
-      .catch((error) => message(error.message, true))
-      .finally(() => {
-        state.refreshing = false;
-      });
+    refreshResources(keys).finally(() => {
+      state.refreshing = false;
+    });
   }
 }
 
@@ -876,13 +1124,16 @@ async function connect() {
     return perform(
       "正在断开并恢复系统代理…",
       async () => {
+        state.phase = "disconnect";
+        renderOverview();
         const result = await api("/api/v1/connection/disconnect", "POST", {});
-        if (result.warning) throw new Error(result.message);
+        return result;
       },
       { success: "已断开，已处理系统代理恢复" },
     );
   if (state.overview?.core?.state === "not_installed") {
     setTab("settings");
+    $("coreSection").open = true;
     message("请先安装 Mihomo 内核，再添加并更新订阅");
     return;
   }
@@ -891,10 +1142,12 @@ async function connect() {
     perform(
       "正在启动内核、验证入口并接入系统代理…",
       async () => {
+        state.phase = "connect";
+        renderOverview();
         const result = await api("/api/v1/connection/connect", "POST", options);
-        if (result.warning) throw new Error(result.message);
+        return result;
       },
-      { success: "系统代理已接入，建议运行连通测试" },
+      { success: "已连接，联网检测完成" },
     );
   if (p.state === "other" || p.state === "automatic")
     return confirm(
@@ -925,7 +1178,6 @@ function routeDialog() {
     ],
     (values) =>
       mutate("切换代理模式…", "/api/v1/settings", "PATCH", {
-        ...state.settings,
         mode: values.mode,
       }),
     {
@@ -958,7 +1210,7 @@ function updateDialog(reference = "all", group = "", kind = "update") {
           group,
           via: values.via,
         });
-        await refreshAll();
+        await refreshChanged();
         closeDialog();
         const body = dialog(title + "结果");
         const summary = updateSummary(result.data);
@@ -1188,7 +1440,7 @@ async function checkConnectivity() {
       const report = await api("/api/v1/connectivity/check", "POST", {});
       if (state.overview) state.overview.connectivity = report;
     },
-    { success: "联网检测已完成，请查看数据页的各路径结果" },
+    { success: "联网检测已完成，请查看状态页" },
   );
   setTab("data");
 }
@@ -1202,8 +1454,13 @@ function installCore() {
       try {
         const err = await native().InstallCore(v.version);
         if (err) throw new Error(err);
-        await refreshAll();
-        message("内核安装完成");
+        state.changed.add("overview");
+        state.changed.add("versions");
+        const failures = await refreshChanged();
+        message(
+          failures.length ? "内核已安装；状态暂未刷新" : "内核安装完成",
+          failures.length > 0,
+        );
       } finally {
         endJob();
       }
@@ -1241,6 +1498,21 @@ function applyTheme(value) {
   $("theme").value = value;
 }
 function bind() {
+  $("currentNode").onclick = () => {
+    $("nodeSearch").value = state.overview?.core?.currentNode || "";
+    renderNodes();
+    $("nodeSearch").focus();
+  };
+  for (const section of ["Subscriptions", "Routing"])
+    $("config" + section).onclick = () => {
+      for (const name of ["Subscriptions", "Routing"]) {
+        $("config" + name + "Body").hidden = name !== section;
+        $("config" + name).setAttribute(
+          "aria-pressed",
+          String(name === section),
+        );
+      }
+    };
   $("addSubscription").onclick = addSubscription;
   $("configAddSub").onclick = addSubscription;
   $("connect").onclick = connect;
@@ -1288,15 +1560,24 @@ function bind() {
         const err = await native().Reconnect();
         if (err) throw new Error(err);
         state.info = await native().Info();
+        Object.keys(resources).forEach((key) => state.changed.add(key));
       },
       { success: "后台已连接" },
     );
   };
   $("refreshData").onclick = () =>
-    perform("刷新状态…", () => refreshOverview(), {
-      refresh: false,
-      success: "状态已刷新",
-    });
+    perform(
+      "刷新状态…",
+      async () => {
+        const failed = await refreshOverview();
+        if (failed.length)
+          throw new Error("状态读取失败，保留上次结果，请重试");
+      },
+      {
+        refresh: false,
+        success: "状态已刷新",
+      },
+    );
   $("refreshLogs").onclick = () =>
     perform(
       "读取日志…",
@@ -1362,12 +1643,40 @@ function bind() {
   matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
     if ($("theme").value === "system") applyTheme("system");
   });
+  $("settingsForm").addEventListener("input", () => {
+    state.dirty = true;
+    renderSettings(true);
+  });
+  $("reloadSettings").onclick = () =>
+    confirm(
+      "重新读取设置",
+      "放弃当前未保存的修改并读取最新设置？",
+      async () => {
+        try {
+          if (await readResource("settings")) {
+            state.dirty = false;
+            renderSettings();
+          }
+        } catch (error) {
+          message("读取失败，当前草稿已保留：" + error.message, true);
+        }
+        renderSyncErrors();
+      },
+      "重新读取",
+    );
+  $("retrySync").onclick = () => refreshResources([...resourceErrors.keys()]);
+  $("retryTray").onclick = async () => {
+    const err = await native().RetryTray();
+    if (err) message(err, true);
+    state.info = await native().Info();
+    renderTray();
+  };
   $("settingsForm").onsubmit = (event) => {
     event.preventDefault();
     if (!state.settings) return;
     const f = event.currentTarget.elements;
     const values = {
-      ...state.settings,
+      revision: state.draft?.revision,
       mixedPort: Number(f.mixedPort.value),
       allowLAN: f.allowLAN.checked,
       tunEnabled: f.tunEnabled.checked,
@@ -1379,7 +1688,10 @@ function bind() {
       "运行中的内核可能重载；端口变更会同时尝试更新受管系统代理。TUN 需要平台权限，请勿与其他虚拟网卡代理冲突。",
       () =>
         perform("保存代理设置…", () =>
-          api("/api/v1/settings", "PATCH", values),
+          api("/api/v1/settings", "PATCH", values).then((value) => {
+            state.dirty = false;
+            return value;
+          }),
         ),
       "应用设置",
     );
@@ -1409,6 +1721,11 @@ function bind() {
       async () => {
         const result = await native().ImportCore();
         if (result.error) throw new Error(result.error);
+        if (result.status === 204)
+          return { warning: true, message: "已取消导入" };
+        affectedResources("/api/v1/core/import").forEach((key) =>
+          state.changed.add(key),
+        );
       },
       { success: "导入流程已完成" },
     );
@@ -1479,7 +1796,7 @@ function bind() {
     if (state.busy || state.refreshing) return;
     state.refreshing = true;
     // 恢复窗口仅刷新状态；不要用后台快照覆盖用户尚未保存的输入。
-    refreshAll({ preserveSettings: true })
+    refreshResources(["overview", "nodes"])
       .catch((error) => message(error.message, true))
       .finally(() => {
         state.refreshing = false;
@@ -1508,6 +1825,7 @@ async function bootstrap() {
           continue;
         }
         await refreshAll();
+        if (!state.online) throw new Error("后台状态暂不可用");
         if (state.info.smokeTest) {
           await document.fonts.ready;
           native().NativeReady(
@@ -1549,25 +1867,24 @@ async function bootstrap() {
     state.info?.error || "后台连接超时，请检查配置或点击重试";
   $("connectionAlert").hidden = false;
 }
-// 可见窗口每 5 秒刷新状态；隐藏和进行操作时不轮询，也不覆盖正在编辑的设置。
+// 可见窗口每 5 秒刷新状态；事务期间仍读取概览，显示真实连接阶段。
 setInterval(async () => {
-  if (document.hidden || state.busy || state.refreshing || !state.info?.ready)
-    return;
+  if (document.hidden || state.refreshing) return;
   state.refreshing = true;
   try {
     state.info = await native().Info();
     renderTray();
-    await refreshOverview();
-    const nodes = await api("/api/v1/nodes");
-    state.nodes = nodes || [];
-    state.nodesFresh = true;
-    renderNodes();
+    // 托盘与后台独立：后台启动失败也要继续显示托盘恢复结果。
+    if (!state.info.ready) {
+      state.online = false;
+      renderOverview();
+      renderData();
+      updateAvailability();
+      return;
+    }
+    await refreshResources(state.busy ? ["overview"] : ["overview", "nodes"]);
   } catch (error) {
-    state.online = false;
-    $("connectionAlert").hidden = false;
-    $("backendMessage").textContent = error.message;
-    renderOverview();
-    renderNodes();
+    message(error.message, true);
   } finally {
     state.refreshing = false;
   }

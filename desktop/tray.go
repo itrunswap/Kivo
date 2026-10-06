@@ -19,54 +19,11 @@ func trayView(o app.Overview, online, busy bool, now time.Time) tray.View {
 		v.Tip = "Kivo · 后台未连接（状态未知）"
 		return v
 	}
-	running := o.Core.State == "running"
-	attached := o.SystemProxy.State == "this_app"
-	on := running && attached && o.ProxyPortListening
-	v.Title = "未连接"
-	v.Tone = "idle"
+	display := app.DisplayConnection(o, now)
+	v.Title, v.Tone = display.Title, display.Tone
 	v.Node = tray.Clean(o.Core.CurrentNode, 64)
-	switch {
-	case attached && !on:
-		v.Title = "代理入口异常"
-		v.Tone = "error"
-	case on:
-		v.Title = "已连接 · 未检测"
-		v.Tone = "active"
-	case running:
-		v.Title = "仅内核运行"
-	case o.Core.State == "not_installed":
-		v.Title = "内核未安装"
-	}
-	if o.SystemProxy.State == "unknown" {
-		v.Title = "系统接入未确认"
-		v.Tone = "error"
-	}
-	if report := o.Connectivity; on && report != nil && !report.Stale && !report.CheckedAt.IsZero() && report.CheckedAt.After(now.Add(-2*time.Minute)) && !report.CheckedAt.After(now.Add(5*time.Second)) {
-		for _, route := range report.Routes {
-			if route.ID == "entry" {
-				switch route.State {
-				case "ok":
-					v.Title = "已连接 · 检测通过"
-					v.Tone = "good"
-				case "failed", "partial":
-					v.Title = "已接入 · 联网异常"
-					v.Tone = "error"
-				}
-			}
-		}
-	}
-	if on && o.Core.Mode == "direct" {
-		v.Title = "已接入 · 直连模式"
-	}
-	if o.SystemProxy.RecoveryPending {
-		v.Title += " · 待恢复备份"
-	}
-	if o.TUNEnabled && !attached {
-		v.Title += " · TUN 已配置"
-	} // 配置开启不能当作实际接管或检测通过。
-	v.Connect = o.SystemProxy.Supported && o.SystemProxy.State != "unknown" && !attached && !o.SystemProxy.RecoveryPending && o.Core.State != "not_installed"
-	v.Disconnect = running || attached || o.SystemProxy.Managed || o.SystemProxy.RecoveryPending
-	v.Check = running && o.ProxyPortListening
+	v.Connect, v.Disconnect = display.CanConnect, display.CanDisconnect
+	v.Check = o.Core.State == "running" && o.ProxyPortListening
 	v.Tip = "Kivo · " + v.Title + "\n节点：" + v.Node
 	if busy {
 		v.Tip = "Kivo · 操作进行中\n" + v.Title
@@ -74,34 +31,128 @@ func trayView(o app.Overview, online, busy bool, now time.Time) tray.View {
 	return v
 }
 
+// startTray 使用一个受控循环管理重试；初次失败和驱动运行后丢失都可以恢复。
 func (d *Desktop) startTray(ctx context.Context) {
-	initCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
-	driver, err := tray.Start(initCtx, tray.Callbacks{Action: d.queueTrayAction, Availability: d.trayAvailability})
-	cancel()
-	d.mu.Lock()
-	d.trayStarting = false
-	if err != nil {
-		d.trayError = "托盘不可用，保持普通窗口模式：" + err.Error()
-		d.trayReady = false
-	} else {
-		d.tray = driver
-		d.trayReady = true
-	}
-	d.mu.Unlock()
-	if err != nil {
-		return
-	}
-	defer driver.Close()
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
+	d.manageTray(ctx, tray.Start, func(attempt int) time.Duration { return time.Duration(attempt*attempt) * time.Second })
+}
+
+// manageTray 注入原生创建和退避时间，测试不依赖实际桌面宿主。
+func (d *Desktop) manageTray(ctx context.Context, create func(context.Context, tray.Callbacks) (tray.Driver, error), delayFor func(int) time.Duration) {
+	attempt := 0
 	for {
-		d.refreshTray(ctx, driver)
 		select {
 		case <-ctx.Done():
+			return
+		default:
+		}
+		d.mu.Lock()
+		d.trayStarting = true
+		d.mu.Unlock()
+		initCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+		driver, err := create(initCtx, tray.Callbacks{Action: d.queueTrayAction, Availability: d.trayAvailability})
+		cancel()
+		d.mu.Lock()
+		d.trayStarting = false
+		if err != nil {
+			d.trayReady = false
+			d.trayError = "托盘暂不可用，窗口仍可使用：" + err.Error()
+		} else {
+			d.tray, d.trayReady, d.trayError = driver, true, ""
+		}
+		d.mu.Unlock()
+		if err == nil {
+			attempt = 0
+			d.runTray(ctx, driver)
+			driver.Close()
+			d.mu.Lock()
+			d.tray = nil
+			d.mu.Unlock()
+			d.trayAvailability(false, "正在重新初始化托盘")
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		attempt++
+		// 最多自动尝试五次，之后等待手动重试，避免长期空转。
+		if attempt >= 5 {
+			select {
+			case <-ctx.Done():
+				return
+			case <-d.trayRetry:
+				attempt = 0
+			}
+		} else {
+			delay := time.NewTimer(delayFor(attempt))
+			select {
+			case <-ctx.Done():
+				delay.Stop()
+				return
+			case <-d.trayRetry:
+				delay.Stop()
+				attempt = 0
+			case <-delay.C:
+			}
+		}
+	}
+}
+
+func (d *Desktop) runTray(ctx context.Context, driver tray.Driver) {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	missing := 0
+	for {
+		d.refreshTray(ctx, driver)
+		d.mu.RLock()
+		ready := d.trayReady
+		d.mu.RUnlock()
+		if ready {
+			missing = 0
+		} else {
+			missing++
+		}
+		if missing >= 3 {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-d.trayRetry:
 			return
 		case <-ticker.C:
 		case <-d.trayWake:
 		}
+	}
+}
+
+// RetryTray 不启动第二个托盘线程，只向生命周期循环发送一次有界重试请求。
+func (d *Desktop) RetryTray() string {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	if d.trayStarting {
+		return "托盘正在初始化"
+	}
+	if d.trayReady {
+		return ""
+	}
+	if d.trayRetry == nil {
+		return "窗口尚未启动"
+	}
+	select {
+	case d.trayRetry <- struct{}{}:
+	default:
+	}
+	return ""
+}
+
+// updateTrayBusy 不等待 HTTP，让原生菜单立即反映事务互斥状态。
+func (d *Desktop) updateTrayBusy() {
+	d.mu.Lock()
+	driver, view := d.tray, d.trayView
+	view.Busy = d.inflight > 0 || d.quitting
+	d.trayView = view
+	d.mu.Unlock()
+	if driver != nil {
+		driver.Update(view)
 	}
 }
 
@@ -113,7 +164,7 @@ func (d *Desktop) trayAvailability(ready bool, reason string) {
 	if ready {
 		d.trayError = ""
 	} else {
-		d.trayError = "托盘宿主不可用，主窗口已保留或恢复。"
+		d.trayError = "托盘宿主不可用，主窗口已保留或恢复。" + reason
 	}
 	d.mu.Unlock()
 	// 回调可能在原生消息线程，不能等待网络或调用 Close 造成重入。
@@ -133,7 +184,7 @@ func (d *Desktop) wakeTray() {
 
 func (d *Desktop) refreshTray(ctx context.Context, driver tray.Driver) {
 	readCtx, cancel := context.WithTimeout(ctx, 7*time.Second)
-	result := d.bridge.Request(readCtx, "GET", "/api/v1/overview", "")
+	result := d.readOverview(readCtx)
 	cancel()
 	var overview app.Overview
 	online := result.Error == "" && result.Status == 200 && json.Unmarshal(result.Data, &overview) == nil

@@ -1,10 +1,10 @@
 [CmdletBinding()]
 param(
-    [string]$Version = "0.3.1-desktop-preview",
+    [string]$Version = "0.3.2-desktop-preview",
     [string]$Commit = "none",
     [string]$BuildDate = "unknown",
     [ValidateSet("amd64", "arm64")][string]$Architecture = "amd64",
-    [string]$OutputDirectory = "dist/desktop/v0.3.1"
+    [string]$OutputDirectory = "dist/desktop/v0.3.2"
 )
 $ErrorActionPreference = "Stop"
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
