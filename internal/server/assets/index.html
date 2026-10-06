@@ -1,0 +1,282 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <meta name="description" content="Kivo 跨平台代理控制台">
+  <title>Kivo</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <div class="ambient ambient-a"></div>
+  <div class="ambient ambient-b"></div>
+
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="主导航">
+      <a class="brand" href="#overview" aria-label="Kivo 首页">
+        <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+        <span><strong>Kivo</strong><small>CONTROL PLANE</small></span>
+      </a>
+
+      <nav class="nav-list">
+        <button class="nav-item active" data-view="overview"><span class="nav-icon">⌁</span><span>概览</span></button>
+        <button class="nav-item" data-view="nodes"><span class="nav-icon">◫</span><span>节点</span><span id="navNodeCount" class="nav-count">—</span></button>
+        <button class="nav-item" data-view="subscriptions"><span class="nav-icon">◇</span><span>订阅</span></button>
+        <button class="nav-item" data-view="cores"><span class="nav-icon">⬡</span><span>内核</span></button>
+        <button class="nav-item" data-view="routing"><span class="nav-icon">⑂</span><span>路由</span></button>
+        <button class="nav-item" data-view="diagnostics"><span class="nav-icon">⌁</span><span>诊断</span></button>
+        <button class="nav-item" data-view="logs"><span class="nav-icon">≡</span><span>日志</span></button>
+        <button class="nav-item" data-view="settings"><span class="nav-icon">⚙</span><span>设置</span></button>
+      </nav>
+
+      <div class="sidebar-footer">
+        <div class="connection-card">
+          <span id="sidebarDot" class="status-dot"></span>
+          <div><strong id="sidebarStatus">正在连接</strong><small id="sidebarCore">Mihomo</small></div>
+        </div>
+        <button id="themeButton" class="icon-button" title="切换主题" aria-label="切换主题">◐</button>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <button id="mobileMenu" class="icon-button mobile-only" aria-label="打开导航">☰</button>
+        <div>
+          <p class="eyebrow">LOCAL NETWORK ORCHESTRATOR</p>
+          <h1 id="pageTitle">网络概览</h1>
+        </div>
+        <div class="top-actions">
+          <span id="lastUpdated" class="last-updated">尚未同步</span>
+          <button id="refreshButton" class="button button-secondary"><span>↻</span> 刷新</button>
+          <button id="quickStartButton" class="button button-primary">启动代理服务</button>
+        </div>
+      </header>
+
+      <section id="installProgress" class="panel install-progress hidden" aria-label="内核安装进度">
+        <div class="panel-heading"><strong id="installStage" role="status">准备安装</strong><span id="installPercent" class="pill">—</span></div>
+        <progress id="installBar" max="100" aria-label="下载进度"></progress>
+        <p id="installDetail">等待连接安装服务…</p>
+      </section>
+
+      <section id="view-overview" class="view active">
+        <div class="hero-grid">
+          <article class="hero-card">
+            <div class="hero-copy">
+              <span id="heroBadge" class="badge badge-muted">外网尚未检测</span>
+              <h2 id="heroNode">正在读取连接状态</h2>
+              <p id="heroDescription">服务启动、系统接入、外网可达，分别确认才放心。</p>
+              <code id="connectionNext" class="connection-next">/status</code>
+              <div class="hero-actions">
+                <button id="heroAction" class="button button-light">安装内核</button>
+                <button class="button button-ghost" data-goto="nodes">查看节点</button>
+              </div>
+            </div>
+          </article>
+
+          <article class="metric-card accent-card">
+            <div class="metric-label">本地代理</div>
+            <div class="port-display"><span>:</span><strong id="metricPort">17890</strong></div>
+            <p>HTTP + SOCKS5 混合端口</p>
+            <button id="copyProxyButton" class="text-button">复制代理地址 <span>↗</span></button>
+            <div class="access-status"><span>系统接入</span><strong id="accessStatus">尚未确认</strong><p id="accessDetail">仅检测服务所在主机</p></div>
+          </article>
+        </div>
+
+        <article class="panel system-proxy-panel" aria-label="系统代理控制">
+          <div class="panel-heading"><div><span class="kicker">SYSTEM ACCESS</span><h3>浏览器自动接入</h3><p id="systemProxyExplanation" role="status">读取系统代理状态…</p></div><span id="systemProxyOwnership" class="pill">未确认</span></div>
+          <div class="system-proxy-actions">
+            <button id="systemProxyOn" class="button button-secondary">仅接入系统代理</button>
+            <button id="systemProxyOff" class="button button-secondary">恢复系统代理，保留内核</button>
+            <button id="systemProxyRecover" class="button button-secondary" hidden>安全恢复备份</button>
+            <button id="systemProxyForce" class="button button-secondary" hidden>强制恢复原设置…</button>
+          </div>
+          <label class="connection-check-option"><input id="checkAfterConnect" type="checkbox" checked> 连接后检测外网（约 10–20 秒）</label>
+          <p class="connectivity-footnote">只操作运行 Kivo 的主机及当前用户，不修改远程访问此网页的设备。浏览器扩展和独立代理设置不在接管范围内。</p>
+          <details class="core-only-actions"><summary>只管理内核（不会自动接入系统代理）</summary><div class="system-proxy-actions"><button data-core-action="start" class="button button-secondary">启动内核</button><button data-core-action="restart" class="button button-secondary">重启内核</button><button data-core-action="stop" class="button button-secondary">停止内核并恢复受管代理</button></div></details>
+        </article>
+
+        <article class="panel connectivity-panel" aria-label="联网检测">
+          <div class="panel-heading">
+            <div><span class="kicker">CONNECTION CHECK</span><h3>现在能上网吗？</h3><p id="connectivityTime">尚未检测 · 不会自动发送外网请求</p></div>
+            <div class="toolbar-actions"><button id="proxySetupButton" class="button button-secondary" aria-expanded="false" aria-controls="proxyGuide">接入 / 停用指引</button><button id="checkConnectivityButton" class="button button-primary">检测外网</button></div>
+          </div>
+          <div id="connectivityRoutes" class="connectivity-grid" aria-live="polite"></div>
+          <p class="connectivity-footnote">仅检测运行 Kivo 的主机到 Google / Cloudflare 的 HTTPS 连通性。通过不代表所有网站或应用均走代理；刷新状态不会重新检测。</p>
+        </article>
+        <article id="proxyGuide" class="panel proxy-guide" hidden>
+          <div class="panel-heading"><h3 id="proxyGuideTitle">接入指引</h3><button id="closeProxyGuide" class="button button-secondary">收起</button></div>
+          <ol id="proxyGuideSteps"></ol>
+          <p id="proxyGuideDisable"></p><p id="proxyGuideWarning" class="security-warning"></p>
+        </article>
+
+        <div class="metrics-grid">
+          <article class="metric-card"><div class="metric-header"><span>内核状态</span><span class="metric-symbol">◉</span></div><strong id="metricCore">未安装</strong><small id="metricVersion">等待安装</small></article>
+          <article class="metric-card"><div class="metric-header"><span>订阅</span><span class="metric-symbol">◇</span></div><strong id="metricSubscriptions">0</strong><small id="metricEnabled">0 个已启用</small></article>
+          <article class="metric-card"><div class="metric-header"><span>入口路由模式</span><span class="metric-symbol">⌘</span></div><strong id="metricMode">RULE</strong><small id="metricTun">仅作用于已接入的流量</small></article>
+          <article class="metric-card"><div class="metric-header"><span>运行平台</span><span class="metric-symbol">⌗</span></div><strong id="metricPlatform">—</strong><small id="metricArch">—</small></article>
+        </div>
+
+        <div class="section-grid">
+          <article class="panel quick-panel">
+            <div class="panel-heading"><div><span class="kicker">QUICK ACTIONS</span><h3>常用操作</h3></div></div>
+            <div class="quick-grid">
+              <button data-goto="subscriptions"><span class="quick-icon violet">＋</span><div><strong>添加订阅</strong><small>URL、Basic 或 Token</small></div><b>→</b></button>
+              <button id="quickTest"><span class="quick-icon cyan">⌁</span><div><strong>节点测速</strong><small>测试全部节点延迟</small></div><b>→</b></button>
+              <button data-goto="diagnostics"><span class="quick-icon orange">✓</span><div><strong>运行诊断</strong><small>检查内核、端口和权限</small></div><b>→</b></button>
+              <button data-goto="logs"><span class="quick-icon green">≡</span><div><strong>查看日志</strong><small>最近 300 条内核输出</small></div><b>→</b></button>
+            </div>
+          </article>
+
+          <article class="panel status-panel">
+            <div class="panel-heading"><div><span class="kicker">RUNTIME</span><h3>运行状态</h3></div><span id="runtimePill" class="pill">内核未运行</span></div>
+            <dl class="status-list">
+              <div><dt>进程 ID</dt><dd id="runtimePID">—</dd></div>
+              <div><dt>PROXY 实际节点</dt><dd id="runtimeNode" class="status-detail">未确认</dd></div>
+              <div><dt>本地代理端口</dt><dd id="runtimeProxyPort">未检测</dd></div>
+              <div><dt>主机系统代理</dt><dd id="runtimeSystemProxy" class="status-detail">未检测</dd></div>
+              <div><dt>控制地址</dt><dd id="runtimeAddress">127.0.0.1</dd></div>
+              <div><dt>TUN 配置</dt><dd id="runtimeTun">关闭</dd></div>
+            </dl>
+          </article>
+        </div>
+      </section>
+
+      <section id="view-nodes" class="view">
+        <div class="section-toolbar">
+          <div class="search-box"><span>⌕</span><input id="nodeSearch" type="search" placeholder="搜索节点名称、类型或订阅"></div>
+          <select id="nodeFilter" class="select"><option value="all">全部节点</option><option value="alive">仅可用</option></select>
+          <button id="testNodesButton" class="button button-secondary">测速全部</button>
+        </div>
+		<p id="nodeTestSummary" class="subscription-result-summary" role="status">检查结果仅代表最近一次测试；节点数量不等于在线数量。</p>
+        <article class="panel table-panel">
+          <div class="table-head"><span>节点</span><span>协议</span><span>订阅</span><span>延迟</span><span>状态</span><span></span></div>
+          <div id="nodeList" class="table-body empty-state"><p>内核运行后，节点将在这里出现。</p></div>
+        </article>
+      </section>
+
+      <section id="view-subscriptions" class="view">
+        <div class="section-toolbar"><div><span class="kicker">PROVIDERS</span><h2>订阅源</h2></div><button id="addSubscriptionButton" class="button button-primary">＋ 添加订阅</button></div>
+        <article class="panel management-bar">
+          <label>当前订阅分组<select id="subscriptionGroupSelect" class="select"></select></label>
+          <button id="useSubscriptionGroup" class="button button-secondary">独占使用</button>
+          <label>订阅下载路径<select id="subscriptionUpdateVia" class="select"><option value="direct">直连</option><option value="proxy">通过 PROXY 出站</option></select></label>
+          <button id="updateSubscriptionGroup" class="button button-secondary">更新当前组</button>
+          <button id="updateAllSubscriptions" class="button button-secondary">更新全部</button>
+          <button id="testSubscriptionGroup" class="button button-secondary">检查当前组</button>
+          <button id="testAllSubscriptions" class="button button-secondary">检查全部</button>
+          <label>新分组<input id="newSubscriptionGroup" placeholder="例如：工作"></label>
+          <button id="createSubscriptionGroup" class="button button-secondary">创建分组</button>
+        </article>
+        <article id="subscriptionResult" class="panel subscription-result" hidden aria-live="polite">
+          <div class="panel-heading"><h3 id="subscriptionResultTitle">更新结果</h3></div>
+          <p id="subscriptionResultSummary" class="subscription-result-summary"></p>
+          <div id="subscriptionResultList"></div>
+        </article>
+        <div id="subscriptionGrid" class="card-grid"><div class="empty-card">还没有订阅，添加一个 Clash/Mihomo 兼容地址。</div></div>
+      </section>
+
+      <section id="view-cores" class="view">
+        <div class="section-toolbar"><div><span class="kicker">CORE INVENTORY</span><h2>内核版本</h2></div><button id="installLatestCore" class="button button-primary">安装最新版</button></div>
+        <article class="panel table-panel">
+          <div class="table-head core-table-head"><span>版本</span><span>引擎</span><span>状态</span><span>路径</span><span></span></div>
+          <div id="coreList" class="table-body empty-state"><p>正在读取内核版本…</p></div>
+        </article>
+      </section>
+
+      <section id="view-routing" class="view">
+        <div class="section-toolbar"><div><span class="kicker">ROUTING PROFILES</span><h2>路由策略</h2></div></div>
+        <div id="routeProfiles" class="card-grid"></div>
+        <article class="panel form-panel route-builder">
+          <div class="panel-heading"><div><h3>添加自定义规则</h3><p>规则按顺序匹配；添加后会安全重载正在运行的内核。</p></div></div>
+          <div class="form-columns">
+            <label>规则组<select id="routeRuleGroup"></select></label>
+            <label>动作<select id="routeRuleAction"><option value="proxy">代理</option><option value="direct">直连</option><option value="reject">拒绝</option></select></label>
+          </div>
+          <div class="form-columns">
+            <label>匹配类型<select id="routeRuleType"><option value="domain">完整域名</option><option value="domain-suffix">域名后缀</option><option value="domain-keyword">域名关键词</option><option value="ip-cidr">IP 网段</option><option value="geoip">GeoIP</option><option value="geosite">GeoSite</option><option value="process-name">进程名称</option><option value="dst-port">目标端口</option></select></label>
+            <label>匹配值<input id="routeRuleValue" placeholder="例如：github.com" required></label>
+          </div>
+          <div class="inline-actions"><button id="addRouteRule" type="button" class="button button-primary">添加规则</button></div>
+        </article>
+        <div id="routeGroups" class="card-grid route-groups"></div>
+      </section>
+
+      <section id="view-diagnostics" class="view">
+        <div class="section-toolbar"><div><span class="kicker">SYSTEM CHECK</span><h2>环境诊断</h2></div><button id="runDoctorButton" class="button button-primary">开始诊断</button></div>
+        <article class="panel"><div id="doctorList" class="doctor-list"><div class="empty-state"><p>点击“开始诊断”检查当前环境。</p></div></div></article>
+      </section>
+
+      <section id="view-logs" class="view">
+        <div class="section-toolbar"><div><span class="kicker">LIVE OUTPUT</span><h2>内核日志</h2></div><div class="toolbar-actions"><label class="switch-label"><input id="autoLogs" type="checkbox" checked><span></span>自动刷新</label><button id="refreshLogsButton" class="button button-secondary">刷新</button></div></div>
+        <article class="terminal-panel"><div class="terminal-bar"><span class="traffic red"></span><span class="traffic yellow"></span><span class="traffic green"></span><b>mihomo.log</b></div><pre id="logOutput">等待日志...</pre></article>
+      </section>
+
+      <section id="view-settings" class="view">
+        <div class="section-toolbar"><div><span class="kicker">CONFIGURATION</span><h2>运行设置</h2></div></div>
+        <form id="settingsForm" class="settings-grid">
+          <article class="panel form-panel">
+            <div class="panel-heading"><div><h3>网络与端口</h3><p>修改后，运行中的内核会安全重启。</p></div></div>
+            <label>本地混合代理端口<input id="settingPort" type="number" min="1" max="65535" required></label>
+            <label>运行模式<select id="settingMode"><option value="rule">规则模式</option><option value="global">全局代理</option><option value="direct">全部直连</option></select></label>
+            <label>内核下载代理<input id="settingDownloadProxy" placeholder="留空使用系统代理；或 http://127.0.0.1:7890"></label>
+            <label>下载重试次数<input id="settingDownloadRetry" type="number" min="1" max="10" value="4"></label>
+          </article>
+          <article class="panel form-panel">
+            <div class="panel-heading"><div><h3>流量接管</h3><p>TUN 会修改系统路由，需要管理员权限。</p></div></div>
+            <label class="toggle-row"><span><strong>允许局域网访问代理</strong><small>开启后请配置防火墙和认证</small></span><input id="settingLAN" type="checkbox"><i></i></label>
+            <label class="toggle-row"><span><strong>启用 TUN 模式</strong><small>接管不支持系统代理的应用</small></span><input id="settingTun" type="checkbox"><i></i></label>
+          </article>
+          <div class="form-actions"><button type="submit" class="button button-primary">保存并应用</button></div>
+        </form>
+        <form id="webSecurityForm" class="panel form-panel security-panel">
+          <div class="panel-heading">
+            <div><h3>Web 访问安全</h3><p>Token 修改后立即生效，不需要重启服务。</p></div>
+            <span id="webAuthBadge" class="pill">读取中</span>
+          </div>
+          <label>设置新的访问 Token
+            <input id="settingWebToken" type="password" autocomplete="new-password" placeholder="任意长度；留空保存则关闭鉴权">
+          </label>
+          <div id="webSecurityWarning" class="security-warning">Token 可使用任意长度，但短 Token 更容易被猜测。关闭鉴权后，任何能访问此地址的设备都可以修改代理配置、订阅和节点。</div>
+          <p id="webSecurityError" class="form-error" role="alert"></p>
+          <div class="inline-actions"><button type="submit" class="button button-primary">保存访问设置</button></div>
+        </form>
+      </section>
+    </main>
+  </div>
+
+  <div id="loginOverlay" class="overlay active">
+    <form id="loginForm" class="auth-card">
+      <div class="auth-logo"><span class="brand-mark"><i></i><i></i><i></i></span></div>
+      <span class="kicker">SECURE CONTROL PLANE</span>
+      <h2>连接 Kivo</h2>
+      <p>输入首次运行时生成的 Web API 密钥。密钥只保存在当前浏览器会话。</p>
+      <label>API 密钥<input id="loginSecret" type="password" autocomplete="current-password" placeholder="输入访问 Token" required></label>
+      <p id="loginError" class="form-error" role="alert"></p>
+      <button class="button button-primary button-full" type="submit">安全连接</button>
+    </form>
+  </div>
+
+  <div id="subscriptionModal" class="overlay modal-overlay" aria-hidden="true">
+    <form id="subscriptionForm" class="modal-card">
+      <div class="modal-header"><div><span class="kicker">NEW PROVIDER</span><h2>添加订阅</h2></div><button class="icon-button" type="button" data-close-modal aria-label="关闭">×</button></div>
+      <div class="form-stack">
+        <label>订阅名称<input id="subName" maxlength="64" placeholder="例如：主线路" required></label>
+        <label>订阅地址<input id="subURL" type="url" placeholder="https://example.com/subscribe?token=..." required></label>
+        <label>认证 / 加密方式<select id="subAuth"><option value="none">URL 已包含 Token / 无认证</option><option value="basic">HTTP Basic Auth</option><option value="bearer">Bearer Token</option><option value="token">Token Header</option><option value="age">AGE 加密密钥</option><option value="aes">AES 加密订阅</option></select></label>
+        <label id="subUsernameRow" class="hidden">用户名<input id="subUsername" autocomplete="username"></label>
+        <label id="subSecretRow" class="hidden"><span id="subSecretLabel">密码或 Token</span><input id="subSecret" type="password" autocomplete="new-password"></label>
+        <label>订阅更新路径<select id="subUpdateVia"><option value="direct">直连（推荐）</option><option value="proxy">通过 PROXY 策略组</option></select></label>
+        <div class="form-columns"><label>更新周期（秒）<input id="subInterval" type="number" value="3600" min="60"></label><label>健康检查（秒）<input id="subHealth" type="number" value="300" min="30"></label></div>
+        <label>节点名称前缀（可选）<input id="subPrefix" placeholder="例如：[主线路]"></label>
+        <label>订阅分组<select id="subGroup"></select></label>
+      </div>
+      <p id="subscriptionError" class="form-error"></p>
+      <div class="modal-actions"><button type="button" class="button button-secondary" data-close-modal>取消</button><button type="submit" class="button button-primary">验证并添加</button></div>
+    </form>
+  </div>
+
+  <div id="toastRegion" class="toast-region" aria-live="polite"></div>
+  <script src="/app.js" defer></script>
+</body>
+</html>

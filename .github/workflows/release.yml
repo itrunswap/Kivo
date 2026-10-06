@@ -1,0 +1,77 @@
+name: 发布六平台安装包
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+# 仅版本标签运行本流程，普通推送与 PR 不获取发布权限。
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      VERSION: ${{ github.ref_name }}
+      COMMIT: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.mod
+      - name: 验证版本标签
+        shell: bash
+        run: |
+          [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "仅支持 v主版本.次版本.补丁版本 正式标签"; exit 1; }
+          echo "BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
+      - name: 运行发布前检查
+        run: |
+          test -z "$(gofmt -l cmd internal scripts)"
+          go test -race ./...
+          go vet ./...
+          node --check internal/server/assets/app.js
+          node --test scripts/test-web.mjs
+      - name: 构建并打包六个平台
+        run: |
+          sh ./scripts/build.sh
+          go run ./scripts/package.go -input dist -output dist/releases
+          cd dist/releases
+          sha256sum --check SHA256SUMS
+      - name: 创建或继续上传草稿版本
+        shell: bash
+        run: |
+          # 允许失败后重跑草稿，但不覆盖已经公开的 Release。
+          if gh release view "$VERSION" --json isDraft >/dev/null 2>&1; then
+            [[ "$(gh release view "$VERSION" --json isDraft --jq .isDraft)" == "true" ]] || { echo "该版本已经发布，拒绝覆盖"; exit 1; }
+          else
+            {
+              printf '# Kivo %s\n\n' "$VERSION"
+              printf '提供 Windows、macOS、Linux 的 AMD64 / ARM64 六个平台安装包。\n\n'
+              printf '每包包含短名程序与中文说明，无需安装 Go 或 Node.js。Mihomo 通过命令另行安装。\n\n'
+              printf 'Windows 解压运行 kivo.exe；macOS / Linux 解压运行 ./kivo。M2 Mac 请选择 darwin-arm64。\n\n'
+              printf 'SHA256SUMS 校验压缩包。程序未签名或公证；交叉构建不等同于实机验收。\n\n'
+              printf '使用说明：https://github.com/%s/blob/%s/docs/USER_MANUAL.md\n\n' "$GH_REPO" "$VERSION"
+              printf '更新记录：https://github.com/%s/blob/%s/CHANGELOG.md\n\n' "$GH_REPO" "$VERSION"
+              printf '项目自身许可证尚待所有者指定，第三方组件声明随包提供。\n'
+            } > "$RUNNER_TEMP/release-notes.md"
+            gh release create "$VERSION" --verify-tag --draft --title "Kivo $VERSION" --notes-file "$RUNNER_TEMP/release-notes.md"
+          fi
+          gh release upload "$VERSION" dist/releases/kivo-* dist/releases/SHA256SUMS --clobber
+      - name: 核对资产后公开发布
+        shell: bash
+        run: |
+          # 确认六个压缩包和清单上传成功后再公开 Release。
+          test "$(gh release view "$VERSION" --json assets --jq '.assets | length')" -eq 7
+          gh release edit "$VERSION" --draft=false --latest

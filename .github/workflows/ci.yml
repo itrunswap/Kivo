@@ -1,0 +1,35 @@
+name: 持续集成
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.mod
+      - name: 检查代码格式
+        run: test -z "$(gofmt -l cmd internal scripts)"
+      - name: Go 测试与竞态检测
+        run: go test -race ./...
+      - name: 静态检查
+        run: go vet ./...
+      - name: 前端语法与回归测试
+        run: |
+          node --check internal/server/assets/app.js
+          node --test scripts/test-web.mjs
+      - name: 六个平台交叉构建
+        run: sh ./scripts/build.sh
+      - name: 发行包打包验证
+        run: go run ./scripts/package.go -input dist -output dist/releases
