@@ -1,9 +1,10 @@
 [CmdletBinding()]
 param(
-    [string]$Version = "0.3.0-desktop-preview",
+    [string]$Version = "0.3.1-desktop-preview",
     [string]$Commit = "none",
     [string]$BuildDate = "unknown",
-    [ValidateSet("amd64", "arm64")][string]$Architecture = "amd64"
+    [ValidateSet("amd64", "arm64")][string]$Architecture = "amd64",
+    [string]$OutputDirectory = "dist/desktop/v0.3.1"
 )
 $ErrorActionPreference = "Stop"
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
@@ -33,7 +34,7 @@ try {
             if ($LASTEXITCODE -ne 0) { throw "桌面依赖许可收集失败" }
         }
         finally { Pop-Location }
-        $OutputRoot = Join-Path $ProjectRoot "dist/desktop"
+        $OutputRoot = [IO.Path]::GetFullPath((Join-Path $ProjectRoot $OutputDirectory))
         New-Item -ItemType Directory -Force -Path $OutputRoot | Out-Null
         $Target = Join-Path $OutputRoot "kivo-desktop-windows-$Architecture.exe"
         Copy-Item -LiteralPath "build/bin/kivo-desktop.exe" -Destination $Target -Force

@@ -32,6 +32,16 @@ const state = {
 let toastTimer, lastFocus;
 const native = () => window.go?.main?.Desktop;
 
+// 原生托盘状态也需持续刷新；丢失宿主后不能继续承诺“关闭可驻留”。
+function renderTray() {
+  $("trayStatus").textContent = state.info?.trayReady
+    ? "托盘已就绪 · 关闭窗口后驻留；点击托盘恢复，右键打开菜单。"
+    : state.info?.trayStarting
+      ? "正在初始化托盘，请稍候…"
+      : state.info?.trayError || "托盘不可用，关闭窗口将退出界面，后台仍保留。";
+  $("hideWindow").disabled = !state.info?.trayReady || state.busy;
+}
+
 function element(tag, className, text) {
   const result = document.createElement(tag);
   if (className) result.className = className;
@@ -709,8 +719,9 @@ function renderData() {
     $("connectivityResults").append(card);
   }
 }
-function renderSettings() {
-  if (state.settings) {
+function renderSettings(preserveForm = false) {
+  renderTray();
+  if (state.settings && !preserveForm) {
     const form = $("settingsForm");
     for (const name of [
       "mixedPort",
@@ -798,7 +809,7 @@ async function refreshOverview() {
   renderOverview();
   renderData();
 }
-async function refreshAll() {
+async function refreshAll({ preserveSettings = false } = {}) {
   try {
     await refreshOverview();
   } catch (error) {
@@ -830,7 +841,7 @@ async function refreshAll() {
   const failed = results.find((item) => item.status === "rejected");
   renderNodes();
   renderConfig();
-  renderSettings();
+  renderSettings(preserveSettings);
   if (failed) message(`部分信息未加载：${failed.reason.message}`, true);
 }
 function setTab(tab, focus = false) {
@@ -1417,14 +1428,18 @@ function bind() {
       );
   $("quit").onclick = () =>
     confirm(
-      "仅关闭窗口",
-      "后台与当前代理会继续运行。可再次打开 Kivo，或使用 CLI 管理。",
+      "退出桌面（保留代理）",
+      "退出窗口和托盘，后台与当前代理继续运行。可再次打开 Kivo，或使用 CLI / Web 管理。",
       async () => {
         const err = await native().Quit(false);
         if (err) message(err, true);
       },
-      "关闭窗口",
+      "退出桌面",
     );
+  $("hideWindow").onclick = async () => {
+    const err = await native().HideWindow();
+    if (err) message(err, true);
+  };
   $("disconnectQuit").onclick = () =>
     confirm(
       "断开并退出",
@@ -1459,6 +1474,20 @@ function bind() {
     });
   });
   window.runtime?.EventsOn("core:progress", installProgress);
+  window.runtime?.EventsOn("desktop:message", (text) => message(text, true));
+  window.runtime?.EventsOn("desktop:refresh", () => {
+    if (state.busy || state.refreshing) return;
+    state.refreshing = true;
+    // 恢复窗口仅刷新状态；不要用后台快照覆盖用户尚未保存的输入。
+    refreshAll({ preserveSettings: true })
+      .catch((error) => message(error.message, true))
+      .finally(() => {
+        state.refreshing = false;
+      });
+  });
+  window.runtime?.EventsOn("desktop:page", (page) => {
+    if (["home", "config", "data", "settings"].includes(page)) setTab(page);
+  });
 }
 async function bootstrap() {
   bind();
@@ -1472,7 +1501,12 @@ async function bootstrap() {
     try {
       if (!native()) throw new Error("等待原生连接…");
       state.info = await native().Info();
+      renderTray();
       if (state.info.ready) {
+        if (state.info.smokeTest && state.info.trayStarting) {
+          await new Promise((resolve) => setTimeout(resolve, 100));
+          continue;
+        }
         await refreshAll();
         if (state.info.smokeTest) {
           await document.fonts.ready;
@@ -1481,6 +1515,7 @@ async function bootstrap() {
               ready: true,
               version: state.info.version,
               bridge: true,
+              tray: state.info.trayReady,
               pages: document.querySelectorAll(".page").length,
               tabs: document.querySelectorAll("[role=tab]").length,
               heading: $("connectionTitle").textContent,
@@ -1520,6 +1555,8 @@ setInterval(async () => {
     return;
   state.refreshing = true;
   try {
+    state.info = await native().Info();
+    renderTray();
     await refreshOverview();
     const nodes = await api("/api/v1/nodes");
     state.nodes = nodes || [];

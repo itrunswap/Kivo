@@ -315,10 +315,13 @@
         <div class="section-heading"><h2>窗口与退出</h2></div>
         <div class="group padded">
           <p class="footnote">
-            关闭窗口仅退出界面，后台与当前代理继续运行。这里不是最小化到托盘。
+            点击窗口 ×
+            将隐藏到托盘，后台与代理继续运行。点击托盘可恢复窗口；真正退出请使用下面的退出按钮。
           </p>
+          <p id="trayStatus" class="footnote" role="status">正在初始化托盘…</p>
           <div class="actions">
-            <button id="quit" class="button">仅关闭窗口</button
+            <button id="hideWindow" class="button">隐藏到托盘</button>
+            <button id="quit" class="button">退出桌面（保留代理）</button
             ><button id="disconnectQuit" class="button danger">
               断开并退出
             </button>

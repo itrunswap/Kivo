@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/itrunswap/Kivo/desktop/internal/tray"
 	"github.com/itrunswap/Kivo/internal/client"
 	"github.com/itrunswap/Kivo/internal/config"
 	"github.com/itrunswap/Kivo/internal/controller"
@@ -61,6 +62,17 @@ type Desktop struct {
 	inflight     int
 	installMu    sync.Mutex
 	quitMu       sync.Mutex
+	windowMu     sync.Mutex // 串行化隐藏与恢复，避免托盘丢失回调先显示、随后又被隐藏。
+	quitting     bool
+	allowExit    bool
+	hidden       bool
+	tray         tray.Driver
+	trayReady    bool
+	trayStarting bool
+	trayError    string
+	trayView     tray.View
+	trayActions  chan tray.Action
+	trayWake     chan struct{}
 	smoke        bool
 	smokeOnce    sync.Once
 }
@@ -68,18 +80,27 @@ type Desktop struct {
 // DesktopInfo 包含可恢复的后台启动状态。
 type DesktopInfo struct {
 	bridge.Info
-	Ready     bool   `json:"ready"`
-	Starting  bool   `json:"starting"`
-	Error     string `json:"error,omitempty"`
-	SmokeTest bool   `json:"smokeTest"`
+	Ready        bool   `json:"ready"`
+	Starting     bool   `json:"starting"`
+	Error        string `json:"error,omitempty"`
+	SmokeTest    bool   `json:"smokeTest"`
+	TrayReady    bool   `json:"trayReady"`
+	TrayStarting bool   `json:"trayStarting"`
+	TrayError    string `json:"trayError,omitempty"`
+	Hidden       bool   `json:"hidden"`
 }
 
 func (d *Desktop) startup(ctx context.Context) {
 	d.mu.Lock()
 	d.ctx, d.cancel = context.WithCancel(ctx)
 	ownContext := d.ctx
+	d.trayActions = make(chan tray.Action, 8)
+	d.trayWake = make(chan struct{}, 1)
+	d.trayStarting = true
 	d.mu.Unlock()
 	go d.Reconnect()
+	go d.startTray(ownContext)
+	go d.trayCommands(ownContext)
 	if d.smoke {
 		go func() {
 			select {
@@ -95,39 +116,69 @@ func (d *Desktop) startup(ctx context.Context) {
 func (d *Desktop) shutdown(context.Context) {
 	d.mu.RLock()
 	cancel := d.cancel
+	driver := d.tray
 	d.mu.RUnlock()
 	if cancel != nil {
 		cancel()
+	}
+	if driver != nil {
+		driver.Close()
 	}
 }
 
 // showWindow 防止第二实例在窗口尚未完成启动时使用空的框架上下文。
 func (d *Desktop) showWindow(options.SecondInstanceData) {
-	d.mu.RLock()
+	d.windowMu.Lock()
+	defer d.windowMu.Unlock()
+	d.mu.Lock()
 	ctx := d.ctx
-	d.mu.RUnlock()
+	if ctx == nil || d.allowExit {
+		d.mu.Unlock()
+		return
+	}
+	d.hidden = false
+	d.mu.Unlock()
 	if ctx != nil {
 		wruntime.WindowUnminimise(ctx)
 		wruntime.WindowShow(ctx)
+		wruntime.EventsEmit(ctx, "desktop:refresh")
 	}
 }
 
-// closing 防止窗口关闭截断安装或系统代理事务；关闭窗口从不偷偷停止后台。
+// closing 区分隐藏与真正退出。托盘未可用时不隐藏；事务或退出进行中阻止关闭。
 func (d *Desktop) closing(ctx context.Context) bool {
 	d.mu.RLock()
-	busy := d.inflight > 0
+	busy := d.inflight > 0 || d.quitting
+	exit := d.allowExit
+	ready, starting := d.trayReady, d.trayStarting
 	d.mu.RUnlock()
+	if exit {
+		return false
+	}
 	if busy {
 		_, _ = wruntime.MessageDialog(ctx, wruntime.MessageDialogOptions{Type: wruntime.InfoDialog, Title: "操作正在进行", Message: "请等待安装或代理操作完成后再关闭窗口。", Buttons: []string{"知道了"}})
+		return true
 	}
-	return busy
+	if starting {
+		return true
+	}
+	if ready {
+		_ = d.HideWindow()
+		return true
+	}
+	return false // 托盘不可用时保留原本的退出 UI 行为，后台仍独立运行。
 }
 
 func (d *Desktop) beginOperation() func() {
 	d.mu.Lock()
+	if d.inflight > 0 || d.quitting || d.allowExit {
+		d.mu.Unlock()
+		return nil
+	}
 	d.inflight++
 	d.mu.Unlock()
-	return func() { d.mu.Lock(); d.inflight--; d.mu.Unlock() }
+	d.wakeTray()
+	return func() { d.mu.Lock(); d.inflight--; d.mu.Unlock(); d.wakeTray() }
 }
 
 // Reconnect 失败时保留窗口和错误提示，用户可修复配置后重试。
@@ -167,7 +218,7 @@ func (d *Desktop) Info() DesktopInfo {
 	info, err := d.bridge.Info()
 	d.mu.RLock()
 	defer d.mu.RUnlock()
-	result := DesktopInfo{Info: info, Ready: d.ready, Starting: d.starting, Error: d.startupError, SmokeTest: d.smoke}
+	result := DesktopInfo{Info: info, Ready: d.ready, Starting: d.starting, Error: d.startupError, SmokeTest: d.smoke, TrayReady: d.trayReady, TrayStarting: d.trayStarting, TrayError: d.trayError, Hidden: d.hidden}
 	if err != nil {
 		result.Error = err.Error()
 		result.Ready = false
@@ -179,6 +230,9 @@ func (d *Desktop) Info() DesktopInfo {
 func (d *Desktop) Request(method, path, body string) bridge.Reply {
 	if method != "GET" {
 		done := d.beginOperation()
+		if done == nil {
+			return bridge.Reply{Error: "其他操作正在进行，请稍后重试", Status: 409}
+		}
 		defer done()
 	}
 	return d.bridge.Request(d.ctx, method, path, body)
@@ -191,6 +245,9 @@ func (d *Desktop) InstallCore(target string) string {
 	}
 	defer d.installMu.Unlock()
 	done := d.beginOperation()
+	if done == nil {
+		return "其他操作正在进行，请稍后重试"
+	}
 	defer done()
 	if err := d.bridge.Install(d.ctx, target, func(event core.InstallEvent) { wruntime.EventsEmit(d.ctx, "core:progress", event) }); err != nil {
 		return err.Error()
@@ -201,6 +258,9 @@ func (d *Desktop) InstallCore(target string) string {
 // ImportCore 使用原生文件选择器，取消选择不产生任何操作。
 func (d *Desktop) ImportCore() bridge.Reply {
 	done := d.beginOperation()
+	if done == nil {
+		return bridge.Reply{Error: "其他操作正在进行，请稍后重试", Status: 409}
+	}
 	defer done()
 	path, err := wruntime.OpenFileDialog(d.ctx, wruntime.OpenDialogOptions{Title: "选择 Mihomo 官方安装包或可执行文件"})
 	if err != nil {
@@ -237,16 +297,19 @@ func (d *Desktop) SetTheme(theme string) {
 
 // Quit 不强制覆盖其他程序的代理设置；恢复失败时保留窗口让用户处理。
 func (d *Desktop) Quit(disconnect bool) string {
-	d.mu.RLock()
-	busy := d.inflight > 0
-	d.mu.RUnlock()
-	if busy {
-		return "操作正在进行，请等待完成后再退出"
-	}
 	if !d.quitMu.TryLock() {
 		return "正在处理退出"
 	}
 	defer d.quitMu.Unlock()
+	d.mu.Lock()
+	if d.inflight > 0 || d.quitting {
+		d.mu.Unlock()
+		return "操作正在进行，请等待完成后再退出"
+	}
+	d.quitting = true
+	d.mu.Unlock()
+	d.wakeTray()
+	defer func() { d.mu.Lock(); d.quitting = false; d.mu.Unlock(); d.wakeTray() }()
 	if disconnect {
 		result := d.bridge.Request(d.ctx, "POST", "/api/v1/connection/disconnect", "{}")
 		if result.Error != "" {
@@ -263,6 +326,9 @@ func (d *Desktop) Quit(disconnect bool) string {
 			return operation.Message
 		}
 	}
+	d.mu.Lock()
+	d.allowExit = true
+	d.mu.Unlock()
 	wruntime.Quit(d.ctx)
 	return ""
 }
@@ -274,6 +340,9 @@ func (d *Desktop) NativeReady(report string) {
 	}
 	d.smokeOnce.Do(func() {
 		_ = os.WriteFile(filepath.Join(d.bridge.Paths.Root, "desktop-smoke.json"), []byte(report), 0o600)
+		d.mu.Lock()
+		d.allowExit = true
+		d.mu.Unlock()
 		wruntime.Quit(d.ctx)
 	})
 }
@@ -334,6 +403,7 @@ func run(rawArgs []string) error {
 		BackgroundColour: options.NewRGB(250, 250, 250),
 		AssetServer:      &assetserver.Options{Assets: desktopAssets{primary: ui, shared: server.EmbeddedAssets()}},
 		OnStartup:        app.startup, OnShutdown: app.shutdown, OnBeforeClose: app.closing, Bind: []interface{}{app},
+		Menu:               desktopMenu(app),
 		SingleInstanceLock: &options.SingleInstanceLock{UniqueId: "kivo-desktop-" + hex.EncodeToString(identity[:16]), OnSecondInstanceLaunch: app.showWindow},
 		Windows:            &windows.Options{Theme: windows.SystemDefault, DisablePinchZoom: true, WebviewUserDataPath: filepath.Join(paths.Root, "desktop-webview"), ResizeDebounceMS: 50},
 		Mac:                &mac.Options{DisableZoom: true, About: &mac.AboutInfo{Title: "Kivo", Message: "轻量级代理控制客户端", Icon: appIcon}},

@@ -14,7 +14,7 @@ Kivo 使用 Go 开发，通过独立的 Mihomo 内核提供代理能力，负责
 
 桌面端采用 Go + Wails 2，使用系统 WebView，不附带 Chromium。紧凑单列提供首页、配置、数据、设置四个标签，和 CLI / Web 共用后台与配置。支持连接开关、真实联网状态、订阅及路由管理、节点选择 / 测速、带进度的内核安装和原生文件导入。
 
-Windows 本地桌面包位于 `dist/desktop/kivo-desktop-windows-amd64.zip`，解压双击 `kivo-desktop.exe`。这不是下方已发布 CLI 包；Mac / Linux 使用单独原生构建流水线，完成实机验收再发布。当前没有托盘，关闭窗口保留后台；“断开并退出”恢复受管系统代理并停止内核。详见[桌面端说明](docs/DESKTOP.md)。
+Windows 本地桌面包位于 `dist/desktop/v0.3.1/kivo-desktop-windows-amd64.zip`，解压双击 `kivo-desktop.exe`。旧版包保留，不覆盖正在运行的程序。这不是下方已发布 CLI 包；Mac / Linux 使用单独原生构建流水线，完成实机验收再发布。托盘就绪后关闭窗口会驻留，点击托盘恢复、右键打开状态及操作菜单；明确区分“退出桌面（保留代理）”与“断开并退出”。详见[桌面端说明](docs/DESKTOP.md)。
 
 ### CLI / Web 已发布版本
 
@@ -22,14 +22,14 @@ Windows 本地桌面包位于 `dist/desktop/kivo-desktop-windows-amd64.zip`，�
 
 仓库若为私有，下载需要登录具备仓库访问权限的 GitHub 账号；不会因为创建 Release 而自动公开源码或安装包。
 
-| 平台 | 设备 | 下载最新版 |
-| --- | --- | --- |
-| Windows AMD64 | 常见 Intel / AMD 64 位电脑 | [kivo-windows-amd64.zip](https://github.com/itrunswap/Kivo/releases/latest/download/kivo-windows-amd64.zip) |
-| Windows ARM64 | Windows on ARM | [kivo-windows-arm64.zip](https://github.com/itrunswap/Kivo/releases/latest/download/kivo-windows-arm64.zip) |
-| macOS ARM64 | Apple Silicon，包括 M2 | [kivo-darwin-arm64.tar.gz](https://github.com/itrunswap/Kivo/releases/latest/download/kivo-darwin-arm64.tar.gz) |
-| macOS AMD64 | Intel Mac | [kivo-darwin-amd64.tar.gz](https://github.com/itrunswap/Kivo/releases/latest/download/kivo-darwin-amd64.tar.gz) |
-| Linux AMD64 | Intel / AMD 64 位电脑、服务器 | [kivo-linux-amd64.tar.gz](https://github.com/itrunswap/Kivo/releases/latest/download/kivo-linux-amd64.tar.gz) |
-| Linux ARM64 | ARM64 设备、服务器 | [kivo-linux-arm64.tar.gz](https://github.com/itrunswap/Kivo/releases/latest/download/kivo-linux-arm64.tar.gz) |
+| 平台          | 设备                          | 下载最新版                                                                                                      |
+| ------------- | ----------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| Windows AMD64 | 常见 Intel / AMD 64 位电脑    | [kivo-windows-amd64.zip](https://github.com/itrunswap/Kivo/releases/latest/download/kivo-windows-amd64.zip)     |
+| Windows ARM64 | Windows on ARM                | [kivo-windows-arm64.zip](https://github.com/itrunswap/Kivo/releases/latest/download/kivo-windows-arm64.zip)     |
+| macOS ARM64   | Apple Silicon，包括 M2        | [kivo-darwin-arm64.tar.gz](https://github.com/itrunswap/Kivo/releases/latest/download/kivo-darwin-arm64.tar.gz) |
+| macOS AMD64   | Intel Mac                     | [kivo-darwin-amd64.tar.gz](https://github.com/itrunswap/Kivo/releases/latest/download/kivo-darwin-amd64.tar.gz) |
+| Linux AMD64   | Intel / AMD 64 位电脑、服务器 | [kivo-linux-amd64.tar.gz](https://github.com/itrunswap/Kivo/releases/latest/download/kivo-linux-amd64.tar.gz)   |
+| Linux ARM64   | ARM64 设备、服务器            | [kivo-linux-arm64.tar.gz](https://github.com/itrunswap/Kivo/releases/latest/download/kivo-linux-arm64.tar.gz)   |
 
 每包包含短名程序 `kivo.exe` 或 `kivo`、中文 README、完整使用说明书和第三方组件声明。Release 同时提供 `SHA256SUMS`，用于验证**压缩包**完整性。Kivo 包不包含 Mihomo，内核通过命令另行安装。
 
@@ -97,11 +97,11 @@ Linux / Intel Mac 替换对应包名。程序尚未签名或公证；macOS 安�
 
 **内核运行 ≠ 系统已接入 ≠ 外网可访问。** 看 `/status` 的三层信息：
 
-| 信息 | 含义 | 下一步 |
-| --- | --- | --- |
-| 内核运行、端口监听 | 本地代理服务可接收请求 | 还需系统或应用接入 |
-| 系统自动接入 / 指向本程序 | 支持系统代理的应用会使用该入口 | 用 `/proxy check` 检测出口 |
-| 最近联网检测通过 | 当时的代理入口、节点出口检测成功 | 切换节点或配置后重新检测 |
+| 信息                      | 含义                             | 下一步                     |
+| ------------------------- | -------------------------------- | -------------------------- |
+| 内核运行、端口监听        | 本地代理服务可接收请求           | 还需系统或应用接入         |
+| 系统自动接入 / 指向本程序 | 支持系统代理的应用会使用该入口   | 用 `/proxy check` 检测出口 |
+| 最近联网检测通过          | 当时的代理入口、节点出口检测成功 | 切换节点或配置后重新检测   |
 
 推荐 `/connect`：启动内核、备份并设置系统代理、检测外网。Windows 支持当前用户系统代理，macOS 使用系统网络服务；Linux 自动设置目前仅覆盖具备会话 D-Bus 的 GNOME 桌面。其他 Linux 环境按 `/proxy setup` 为应用手动配置 HTTP / SOCKS5 代理。它不是全流量 VPN，部分应用不读取系统代理。
 
@@ -109,24 +109,24 @@ Linux / Intel Mac 替换对应包名。程序尚未签名或公证；macOS 安�
 
 ## 常用命令
 
-| 命令 | 用途 |
-| --- | --- |
-| `/status`、`/proxy check` | 状态和真实联网检测 |
-| `/connect`、`/disconnect` | 自动接入；恢复受管系统代理并停止内核 |
-| `/system-proxy status\|on\|off\|recover` | 独立查询、设置与恢复系统代理 |
-| `/core status\|start\|stop\|restart\|list` | 内核状态、启停和版本列表 |
-| `/core install\|import\|use\|remove\|purge` | 下载、离线导入、切换、卸载 |
-| `/sub add\|list\|show\|edit\|remove` | 添加、查询、编辑、删除订阅 |
-| `/sub update [目标] [--direct\|--proxy]` | 更新指定订阅；省略目标或 `all` 更新全部活动订阅 |
-| `/sub update group <分组> [--direct\|--proxy]` | 更新指定分组的活动订阅 |
-| `/sub test ...`、`/sub group ...` | 订阅检查与分组管理 |
-| `/node list [关键词]`、`/node test`、`/node use <序号或名称>` | 列表、延迟测试、选择节点 |
-| `/mode rule\|global\|direct`、`/route ...` | 代理模式、路由配置与规则组 |
-| `/port`、`/tun ...`、`/lan ...` | 端口、TUN、局域网接入 |
-| `/web --show-token`、`/web status\|start\|stop\|restart` | 页面地址、登录 Token、服务生命周期 |
-| `/doctor`、`/logs`、`/help` | 诊断、日志、完整帮助 |
-| `/quit` | 只退出当前终端，后台代理继续运行 |
-| `/shutdown` | 停止内核、恢复受管系统代理、关闭 Web 并退出 |
+| 命令                                                          | 用途                                            |
+| ------------------------------------------------------------- | ----------------------------------------------- |
+| `/status`、`/proxy check`                                     | 状态和真实联网检测                              |
+| `/connect`、`/disconnect`                                     | 自动接入；恢复受管系统代理并停止内核            |
+| `/system-proxy status\|on\|off\|recover`                      | 独立查询、设置与恢复系统代理                    |
+| `/core status\|start\|stop\|restart\|list`                    | 内核状态、启停和版本列表                        |
+| `/core install\|import\|use\|remove\|purge`                   | 下载、离线导入、切换、卸载                      |
+| `/sub add\|list\|show\|edit\|remove`                          | 添加、查询、编辑、删除订阅                      |
+| `/sub update [目标] [--direct\|--proxy]`                      | 更新指定订阅；省略目标或 `all` 更新全部活动订阅 |
+| `/sub update group <分组> [--direct\|--proxy]`                | 更新指定分组的活动订阅                          |
+| `/sub test ...`、`/sub group ...`                             | 订阅检查与分组管理                              |
+| `/node list [关键词]`、`/node test`、`/node use <序号或名称>` | 列表、延迟测试、选择节点                        |
+| `/mode rule\|global\|direct`、`/route ...`                    | 代理模式、路由配置与规则组                      |
+| `/port`、`/tun ...`、`/lan ...`                               | 端口、TUN、局域网接入                           |
+| `/web --show-token`、`/web status\|start\|stop\|restart`      | 页面地址、登录 Token、服务生命周期              |
+| `/doctor`、`/logs`、`/help`                                   | 诊断、日志、完整帮助                            |
+| `/quit`                                                       | 只退出当前终端，后台代理继续运行                |
+| `/shutdown`                                                   | 停止内核、恢复受管系统代理、关闭 Web 并退出     |
 
 直接运行子命令时去掉 `/`，例如 `kivo status`、`kivo sub update all --direct`。**关闭终端窗口不等于关闭代理**。高级命令、参数和退出区别见[完整说明书](docs/USER_MANUAL.md)。
 
@@ -140,11 +140,11 @@ Linux / Intel Mac 替换对应包名。程序尚未签名或公证；macOS 安�
 
 ## 配置与升级
 
-| 系统 | 新安装默认数据目录 |
-| --- | --- |
-| Windows | `%APPDATA%\Kivo` |
-| macOS | `~/Library/Application Support/Kivo` |
-| Linux | 通常为 `~/.config/Kivo`，遵循 `XDG_CONFIG_HOME` |
+| 系统    | 新安装默认数据目录                              |
+| ------- | ----------------------------------------------- |
+| Windows | `%APPDATA%\Kivo`                                |
+| macOS   | `~/Library/Application Support/Kivo`            |
+| Linux   | 通常为 `~/.config/Kivo`，遵循 `XDG_CONFIG_HOME` |
 
 目录保存配置、订阅凭据、内核、缓存、日志与系统代理恢复备份。`--data-dir <目录>` 可指定位置。若新目录尚无配置、旧 `ProxyPilot` 目录已有配置，则继续使用旧目录；不会自动搬移数据。
 

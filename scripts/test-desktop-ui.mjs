@@ -209,3 +209,29 @@ test("任意业务错误不会转成成功消息，原生请求始终只发送 J
     (err) => err.message === "failed" && err.data.results[0].nodeCount === 2,
   );
 });
+
+test("托盘未初始化或丢失时禁止隐藏，状态文案不能承诺仍可驻留", () => {
+  const h = harness();
+  h.run("state.info={trayStarting:true};renderTray()");
+  assert.equal(h.nodes.get("hideWindow").disabled, true);
+  assert.match(h.nodes.get("trayStatus").textContent, /正在初始化/);
+  h.run("state.info={trayReady:true};renderTray()");
+  assert.equal(h.nodes.get("hideWindow").disabled, false);
+  h.run(
+    'state.info={trayReady:false,trayError:"托盘宿主不可用，主窗口已恢复"};renderTray()',
+  );
+  assert.equal(h.nodes.get("hideWindow").disabled, true);
+  assert.match(h.nodes.get("trayStatus").textContent, /主窗口已恢复/);
+  h.run("state.info={trayReady:true};state.busy=true;renderTray()");
+  assert.equal(h.nodes.get("hideWindow").disabled, true);
+});
+
+test("恢复窗口刷新状态不会覆盖尚未保存的设置表单", () => {
+  const h = harness();
+  h.run(
+    "state.settings={mixedPort:17890};state.versions=[];renderSettings(true)",
+  );
+  // 空表单没有控件：若恢复流程错误地重填表单，此处会抛异常。
+  assert.equal(h.nodes.get("settingsForm"), undefined);
+  assert.match(h.nodes.get("installedCore").textContent, /尚未安装/);
+});

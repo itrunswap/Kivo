@@ -10,7 +10,7 @@
   "info": {
     "companyName": "Kivo",
     "productName": "Kivo",
-    "productVersion": "0.3.0",
+    "productVersion": "0.3.1",
     "copyright": "Kivo",
     "comments": "轻量级跨平台代理客户端"
   }
