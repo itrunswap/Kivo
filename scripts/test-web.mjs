@@ -12,20 +12,24 @@ const functions = source.slice(0, bootstrapOffset);
 function harness(response) {
   const elements = new Map();
   const element = () => ({
-      textContent: "", value: undefined, dataset: {},
+      textContent: "", value: undefined, dataset: {}, disabled:false,
       children: [],
+      get childNodes() { return this.children; },
+      get lastElementChild() { return this.children.at(-1); },
+      classList: {add(){},remove(){},toggle(){},contains(){return false}},
       append(...items) { this.children.push(...items); },
       replaceChildren(...items) { this.children = items; },
       removeAttribute(name) { delete this[name]; },
       setAttribute(name,value) { this[name]=value; },
       scrollIntoView() {},
+      focus() {},
 	  addEventListener() {},
     });
   const document = { createElement: element, querySelector(selector) {
     if (!elements.has(selector)) elements.set(selector, element());
     return elements.get(selector);
   }};
-  const context = vm.createContext({document, sessionStorage:{getItem:()=>null}, TextDecoder, Headers, fetch:async()=>response});
+  const context = vm.createContext({document, sessionStorage:{getItem:()=>null}, TextDecoder, Headers, fetch:async()=>response, setTimeout:()=>0});
   vm.runInContext(functions, context);
   return { elements, run:code=>vm.runInContext(code, context) };
 }
@@ -168,4 +172,90 @@ test("结果面板显示节点数、原数量、失败原因，未知数量不�
   assert.match(rows[1].children[1].textContent,/PROXY.*节点数未确认/);
   assert.equal(rows[1].children[2].textContent,"服务器暂不可用");
   assert.match(h.elements.get("#subscriptionResultSummary").textContent,/已尝试恢复停止/);
+});
+
+test("空路径和只通过一条代理路径不能被视作外网通过",()=>{
+  const h=harness(null);
+  assert.equal(h.run('proxyChecksPassed({routes:[]})'),false);
+  assert.equal(h.run('proxyChecksPassed({routes:[{id:"entry",state:"ok"}]})'),false);
+  assert.equal(h.run('proxyChecksPassed({routes:[{id:"entry",state:"ok"},{id:"node",state:"ok"}]})'),true);
+  assert.equal(h.run('proxyChecksPassed({stale:true,routes:[{id:"entry",state:"ok"},{id:"node",state:"ok"}]})'),false);
+});
+
+test("内核停止和非法检测时间使旧成功结果失效",()=>{
+  const h=harness(null);
+  h.run('globalThis.fixture={core:{state:"running"},proxyPortListening:true,connectivity:{checkedAt:new Date().toISOString(),routes:[{id:"entry",state:"ok"},{id:"node",state:"ok"}]},connection:{level:"ok",title:"已联网"}}');
+  assert.equal(h.run('connectivityStale(fixture)'),false);
+  h.run('fixture.core.state="stopped";renderConnectionChain(fixture);renderConnectivity(fixture)');
+  assert.equal(h.run('connectivityStale(fixture)'),true);
+  assert.doesNotMatch(h.elements.get("#chainInternetDot").className,/online/);
+  for(const card of h.elements.get("#connectivityRoutes").children)assert.match(card.className,/is-stale/);
+  h.run('fixture.core.state="running";fixture.connectivity.checkedAt="invalid"');
+  assert.equal(h.run('connectivityStale(fixture)'),true);
+});
+
+test("节点分页覆盖全部节点，末页钳制且筛选后不残留空页",()=>{
+  const h=harness(null);
+  h.run('state.nodes=Array.from({length:218},(_,i)=>({name:"node-"+i,type:"Trojan",providerName:"primary",alive:true,delay:50+i}));renderNodes()');
+  assert.equal(h.elements.get("#nodeList").children.length,24);
+  assert.match(h.elements.get("#nodePageInfo").textContent,/1–24.*218/);
+  h.run('state.nodePage=10;renderNodes()');
+  assert.equal(h.elements.get("#nodeList").children.length,2);
+  assert.equal(h.elements.get("#nodeNext").disabled,true);
+  h.run('$("#nodeSearch").value="node-217";renderNodes()');
+  assert.equal(h.elements.get("#nodeList").children.length,1);
+  assert.equal(h.run('state.nodePage'),1);
+});
+
+test("节点延迟排序将失败和离线缓存放到通过检查的节点之后",()=>{
+  const h=harness(null);
+  h.run('state.nodes=[{name:"cached",delay:1,alive:true,cached:true},{name:"failed",delay:0,alive:false},{name:"slow",delay:150,alive:true},{name:"fast",delay:50,alive:true}];$("#nodeSort").value="latency"');
+  assert.equal(h.run('filteredNodes().map(x=>x.name).join(",")'),"fast,slow,cached,failed");
+  h.run('$("#nodeFilter").value="alive"');
+  assert.equal(h.run('filteredNodes().map(x=>x.name).join(",")'),"fast,slow");
+  h.run('state.delays.failed=30');
+  assert.equal(h.run('filteredNodes().map(x=>x.name).join(",")'),"failed,fast,slow");
+});
+
+test("忙碌按钮恢复图标、原有禁用状态，重复调用不覆盖原标签",()=>{
+  const h=harness(null);
+  h.run('globalThis.button=$("#test");button.children=[{icon:true},{textContent:"保存"}];button.disabled=true;setBusy(button,true,"处理中");setBusy(button,true,"重复");setBusy(button,false)');
+  const button=h.elements.get("#test");
+  assert.equal(button.children.length,2);
+  assert.equal(button.children[0].icon,true);
+  assert.equal(button.disabled,true);
+  assert.equal(button["aria-busy"],undefined);
+});
+
+test("节点和日志里的 HTML 保持文本，不生成可执行标签",()=>{
+  const h=harness(null);
+  h.run('state.nodes=[{name:"<img src=x onerror=alert(1)>",delay:0}];renderNodes();state.logs=["<script>alert(1)</script>"];renderLogs()');
+  const name=h.elements.get("#nodeList").children[0].children[0].children[1];
+  assert.equal(name.textContent,"<img src=x onerror=alert(1)>");
+  assert.equal(h.elements.get("#logOutput").textContent,"<script>alert(1)</script>");
+});
+
+test("八个页面保留 API 交互元素且 ID 不重复",()=>{
+  const html=readFileSync(new URL("../internal/server/assets/index.html",import.meta.url),"utf8");
+  const ids=[...html.matchAll(/\bid="([^"]+)"/g)].map(match=>match[1]);
+  assert.equal(ids.length,new Set(ids).size);
+  for(const name of ["overview","nodes","subscriptions","cores","routing","diagnostics","logs","settings"])assert.ok(ids.includes("view-"+name));
+  for(const match of functions.matchAll(/(?:\$|on)\("#([A-Za-z][A-Za-z0-9_-]*)[^"]*"/g))assert.ok(ids.includes(match[1]),"缺少 DOM 元素 "+match[1]);
+  assert.doesNotMatch(html,/<script[^>]+src="https?:/);
+});
+
+test("设置保存保留持久监听地址，不把临时 serve 覆盖写回配置",async()=>{
+  const h=harness(null);
+  h.run('globalThis.requests=[];api=async(path,options)=>{requests.push(JSON.parse(options.body));return requests.at(-1)};refreshOverview=async()=>{};toast=()=>{};state.settings={listen:"127.0.0.1:9099"};state.overview={webAddress:"127.0.0.1:19400"};$("#settingPort").value="17890";$("#settingMode").value="rule";$("#settingDownloadProxy").value="";$("#settingDownloadRetry").value="4"');
+  await h.run('handleSettingsSubmit({preventDefault(){},submitter:$("#save")})');
+  assert.equal(h.run('requests[0].listen'),"127.0.0.1:9099");
+  assert.equal(h.run('state.settingsDirty'),false);
+});
+
+test("相同 hash 导航不重复加载，非法 hash 回到安全页面",()=>{
+  const h=harness(null);
+  h.run('document.querySelectorAll=()=>[];globalThis.location={hash:"#nodes"};globalThis.window={scrollTo(){},matchMedia(){return {matches:false}}};globalThis.loads=0;loadNodes=()=>{loads++};switchView("nodes");switchView("nodes");');
+  assert.equal(h.run('loads'),1);
+  h.run('switchView("\\\"[bad-selector")');
+  assert.equal(h.run('state.activeView'),"overview");
 });

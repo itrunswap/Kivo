@@ -33,6 +33,12 @@ const state = {
   authEnabled: true,
   subscriptionGroups: [],
   routing: null,
+  nodePage: 1,
+  nodePageSize: 24,
+  logs: [],
+  nodesLoading: false,
+  logsLoading: false,
+  overviewLoading: false,
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -57,16 +63,44 @@ async function api(path, options = {}) {
   return payload.data;
 }
 
+// 暂存原有子节点，处理结束恢复图标和禁用状态，不使用 innerHTML。
+const busyButtons = new WeakMap();
 function setBusy(button, busy, label = "处理中…") {
   if (!button) return;
   if (busy) {
-    button.dataset.label = button.textContent;
+    if (busyButtons.has(button)) return;
+    busyButtons.set(button, {nodes:[...button.childNodes], text:button.textContent, disabled:button.disabled});
     button.textContent = label;
     button.disabled = true;
+    button.setAttribute("aria-busy", "true");
   } else {
-    button.textContent = button.dataset.label || button.textContent;
-    button.disabled = false;
+    const previous = busyButtons.get(button);
+    if (!previous) return;
+    if (previous.nodes.length) button.replaceChildren(...previous.nodes);
+    else button.textContent = previous.text;
+    button.disabled = previous.disabled;
+    button.removeAttribute("aria-busy");
+    busyButtons.delete(button);
   }
+}
+
+// 外部来源的节点名、订阅名与日志只写文本节点，不能成为可执行 HTML。
+function textElement(tag, text, className = "") {
+  const item = document.createElement(tag);
+  item.textContent = text;
+  if (className) item.className = className;
+  return item;
+}
+function renderEmpty(target, title, detail, action) {
+  target.replaceChildren(textElement("h3", title), textElement("p", detail));
+  if (action) {
+    const button = textElement("button", action.label, "button button-secondary");
+    button.addEventListener("click", action.run);
+    target.append(button);
+  }
+}
+function persistPreference(storage, key, value) {
+  try { storage.setItem(key, value); } catch { /* 隐私模式下保留内存偏好。 */ }
 }
 
 function toast(message, type = "success") {
@@ -79,26 +113,57 @@ function toast(message, type = "success") {
 
 function showLogin(message = "") {
   $("#loginError").textContent = message;
+  state.authenticated = false;
+  $(".app-shell").inert = true;
+  if ($("#loginOverlay").classList.contains("active")) { $("#loginSecret").focus(); return; }
   $("#loginOverlay").classList.add("active");
   setTimeout(() => $("#loginSecret").focus(), 30);
 }
 
-function hideLogin() { $("#loginOverlay").classList.remove("active"); }
+function hideLogin() {
+  state.authenticated = true;
+  $("#loginOverlay").classList.remove("active");
+  $(".app-shell").inert = $("#subscriptionModal").classList.contains("active");
+}
 
-function switchView(name) {
+const viewTitles = {overview:"网络概览",nodes:"代理节点",subscriptions:"订阅管理",cores:"内核管理",routing:"路由策略",diagnostics:"环境诊断",logs:"运行日志",settings:"偏好设置"};
+function setSidebarOpen(open) {
+  $(".sidebar").classList.toggle("open", open);
+  $(".sidebar").inert = window.matchMedia("(max-width:760px)").matches && !open;
+  $("#sidebarBackdrop").hidden = !open;
+  $("#mobileMenu").setAttribute("aria-expanded", String(open));
+  if (open) $(".nav-item.active").focus();
+}
+function loadActiveView(name = state.activeView) {
+  const loaders = {nodes:loadNodes, subscriptions:loadSubscriptions, cores:loadCores, routing:loadRouting, logs:loadLogs, settings:loadSettings};
+  return loaders[name]?.();
+}
+function switchView(name, {reload = false, load = true} = {}) {
+  // hash 使用白名单；相同页面的 hashchange 不重复请求，也不拼接未经验证的选择器。
+  if (!Object.hasOwn(viewTitles, name)) name = "overview";
+  const changed = name !== state.activeView || !state.viewInitialized;
+  if (changed && state.activeView === "settings" && state.settingsDirty) {
+    if (!confirm("网络设置尚未保存，离开页面会丢弃这些修改。继续吗？")) {
+      location.hash = "settings";
+      return;
+    }
+    state.settingsDirty = false;
+  }
   state.activeView = name;
-  const titles = {overview:"网络概览", nodes:"节点管理", subscriptions:"订阅源", cores:"内核版本", routing:"路由策略", diagnostics:"环境诊断", logs:"内核日志", settings:"运行设置"};
+  state.viewInitialized = true;
   $$(".view").forEach((view) => view.classList.toggle("active", view.id === `view-${name}`));
-  $$(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.view === name));
-  $("#pageTitle").textContent = titles[name] || "Kivo";
-  $(".sidebar").classList.remove("open");
-  location.hash = name;
-  if (name === "nodes") loadNodes();
-  if (name === "subscriptions") loadSubscriptions();
-  if (name === "cores") loadCores();
-  if (name === "routing") loadRouting();
-  if (name === "logs") loadLogs();
-  if (name === "settings") loadSettings();
+  $$(".nav-item").forEach(item => {
+    const active = item.dataset.view === name;
+    item.classList.toggle("active", active);
+    if (active) item.setAttribute("aria-current", "page");
+    else item.removeAttribute("aria-current");
+  });
+  $("#pageTitle").textContent = viewTitles[name];
+  document.title = `Kivo · ${viewTitles[name]}`;
+  setSidebarOpen(false);
+  if (location.hash !== `#${name}`) location.hash = name;
+  if (changed) window.scrollTo({top:0,behavior:"instant"});
+  if (load && (changed || reload)) return loadActiveView(name);
 }
 
 function coreRunning() { return state.overview?.core?.state === "running"; }
@@ -118,10 +183,10 @@ function proxyConnectOptions(data) {
 
 function renderSystemProxy(data) {
   const proxy = data.systemProxy || {};
-  const ready = data.core.state === "running" && data.proxyPortListening;
+  const ready = data.core?.state === "running" && data.proxyPortListening;
   $("#systemProxyOwnership").textContent = proxy.recoveryPending ? "备份待恢复" : proxy.managed ? "自动管理" : proxy.state === "this_app" ? "手动配置" : "未接入";
   $("#systemProxyOwnership").className = `pill ${proxy.managed && ready ? "online" : ""}`;
-  $("#systemProxyExplanation").textContent = proxy.recoveryPending ? "检测到未完成的恢复或外部修改。备份保留，先安全恢复；强制恢复需要额外确认。" : proxy.managed ? "浏览器已接入；断开、停止内核或正常关闭后台时恢复原设置。外网是否可用请查看下方检测。" : proxy.state === "this_app" ? "手动代理指向本程序，尚未接管；点击连接并确认接管后，才由本程序负责恢复。" : proxy.supported ? "点击“连接代理”：启动内核 → 接入系统代理 → 检测外网。无需再到系统设置中填写地址。" : proxy.message || "状态尚未确认，请刷新。";
+  $("#systemProxyExplanation").textContent = proxy.recoveryPending ? "检测到未完成的恢复或外部修改。备份保留，先安全恢复；强制恢复需要额外确认。" : proxy.managed ? (ready ? "系统代理已自动接入；断开时恢复原设置。是否能上网请查看连接健康度。" : "系统代理仍指向本程序，但服务未就绪。请启动内核或恢复原设置。") : proxy.state === "this_app" ? "手动代理指向本程序，尚未接管；点击连接并确认接管后，才由本程序负责恢复。" : proxy.supported ? "点击“连接代理”：启动内核 → 接入系统代理 → 检测外网。无需再到系统设置中填写地址。" : proxy.message || "状态尚未确认，请刷新。";
   $("#systemProxyOn").disabled = state.connecting || !ready || !proxy.supported || proxy.managed || proxy.recoveryPending;
   $("#systemProxyOff").disabled = state.connecting || !proxy.managed;
   $("#systemProxyRecover").hidden = !proxy.recoveryPending;
@@ -130,6 +195,8 @@ function renderSystemProxy(data) {
 }
 
 async function refreshOverview(silent = false) {
+  if (state.overviewLoading) return;
+  state.overviewLoading = true;
   try {
     state.overview = await api("/api/v1/overview");
     renderOverview(state.overview);
@@ -146,17 +213,18 @@ async function refreshOverview(silent = false) {
         connection:{level:"error",title:"控制服务未连接 · 当前状态未知",detail:"无法读取最新状态，不代表代理进程已经停止。请检查服务后刷新。",nextCommand:"/web status"}});
       $("#lastUpdated").textContent = "同步失败 · 显示状态未确认";
     }
+    if (!state.overview) renderOverview({core:{state:"unknown"},systemProxy:{},connection:{level:"error",title:"控制服务未连接 · 当前状态未知",detail:"请检查控制服务后刷新。",nextCommand:"/web status"}});
     $("#heroBadge").className = "badge badge-error";
     $("#heroBadge").textContent = "状态未同步";
     $("#heroNode").textContent = "控制服务未连接 · 当前状态未知";
     $("#heroDescription").textContent = "无法读取最新状态，不代表代理进程已经停止。请检查控制服务后刷新。";
     $("#connectionNext").textContent = "下一步  /web status";
     if (!silent) toast(error.message, "error");
-  }
+  } finally { state.overviewLoading = false; }
 }
 
 function renderOverview(data) {
-  const core = data.core;
+  const core = data.core || {state:"unknown"};
   const running = core.state === "running";
   const installed = core.state !== "not_installed";
   const failed = core.state === "failed";
@@ -176,12 +244,12 @@ function renderOverview(data) {
   $("#accessDetail").textContent = data.systemProxy?.message || "仅检测服务所在主机，浏览器独立设置需单独确认。";
   $("#metricCore").textContent = ({running:"运行中",failed:"异常",starting:"启动中",stopping:"停止中",stopped:"已停止",not_installed:"未安装"})[core.state] || "未知";
   $("#metricVersion").textContent = core.version || "等待安装";
-  $("#metricSubscriptions").textContent = data.subscriptionCount;
-  $("#metricEnabled").textContent = `${data.enabledCount} 个已启用`;
-  $("#metricMode").textContent = (core.mode || "rule").toUpperCase();
+  $("#metricSubscriptions").textContent = data.subscriptionCount ?? "—";
+  $("#metricEnabled").textContent = `${data.enabledCount ?? 0} 个已启用`;
+  $("#metricMode").textContent = ({rule:"规则模式",global:"全局代理",direct:"全部直连"})[core.mode] || "待确认";
   $("#metricTun").textContent = "仅作用于已接入的流量";
-  $("#metricPlatform").textContent = data.platform.toUpperCase();
-  $("#metricArch").textContent = data.architecture;
+  $("#metricPlatform").textContent = ({windows:"Windows",darwin:"macOS",linux:"Linux"})[data.platform] || data.platform || "—";
+  $("#metricArch").textContent = data.architecture || "—";
   $("#runtimePill").className = `pill ${running ? "online" : ""}`;
   $("#runtimePill").textContent = core.state === "unknown" ? "状态未同步" : running ? "内核运行中" : "内核未运行";
   $("#runtimePID").textContent = core.pid || "—";
@@ -191,10 +259,44 @@ function renderOverview(data) {
   $("#runtimeProxyPort").textContent = `${core.mixedPort || "—"} · ${core.state === "unknown" ? "未确认" : data.proxyPortListening ? "正在监听" : "未监听"}`;
   $("#runtimeSystemProxy").textContent = data.systemProxy?.message || "未检测，请更新后台服务";
   $("#runtimeSystemProxy").title = "仅检测运行 Kivo 的主机和用户，不代表访问此页面的设备；浏览器扩展可能覆盖系统设置。";
+  renderConnectionChain(data);
   if (state.installing) $("#heroAction").textContent = "正在安装…";
   if (state.connecting) { $("#heroAction").textContent = "正在处理代理…"; $("#quickStartButton").textContent = "正在处理代理…"; }
 }
 
+// 接入和联网分开表达：内核运行不等于浏览器已接入，节点测速不等于外网检测。
+function connectivityStale(data) {
+  const report = data.connectivity;
+  const checkedAt = Date.parse(report?.checkedAt || "");
+  return !report || report.stale || !Number.isFinite(checkedAt) ||
+    Date.now() - checkedAt > 120000 || data.core?.state !== "running" || !data.proxyPortListening;
+}
+function proxyChecksPassed(report) {
+  return !report?.stale && ["entry", "node"].every(id => report?.routes?.some(route => route.id === id && route.state === "ok"));
+}
+function renderConnectionChain(data) {
+  const core = data.core || {};
+  const ready = core.state === "running" && data.proxyPortListening;
+  const proxy = data.systemProxy || {};
+  const access = ready && proxy.state === "this_app" && !proxy.recoveryPending;
+  const fresh = !connectivityStale(data);
+  const passed = fresh && proxyChecksPassed(data.connectivity);
+  const service = core.state === "unknown" ? "状态未同步" : ready ? "运行中 · 端口就绪" : core.state === "not_installed" ? "尚未安装内核" : core.state === "running" ? "运行中 · 端口未就绪" : "内核未运行";
+  $("#chainService").textContent = service;
+  $("#chainServiceDot").className = `status-dot ${ready ? "online" : core.state === "failed" ? "error" : ""}`;
+  $("#chainAccess").textContent = proxy.recoveryPending ? "备份待恢复" : access ? proxy.managed ? "已自动接入" : "手动接入 · 未接管" : proxy.state === "this_app" ? "已配置 · 服务未就绪" : core.state === "unknown" ? "状态未确认" : "未接入本程序";
+  $("#chainAccessDot").className = `status-dot ${access ? "online" : proxy.recoveryPending ? "warning" : ""}`;
+  $("#chainInternet").textContent = passed ? "代理路径检测通过" : fresh ? "有路径未通过" : data.connectivity ? "结果失效 · 待重测" : "尚未检测";
+  $("#chainInternetDot").className = `status-dot ${passed ? "online" : fresh ? "warning" : ""}`;
+  const name = core.effectiveNode || core.currentNode;
+  $("#selectedNodeName").textContent = core.state === "unknown" ? "出口状态未确认" : core.state === "running" ? name || "尚未选择节点" : "代理内核未运行";
+  $("#selectedNodeDetail").textContent = core.state === "running" ? "PROXY 策略组实际出口" : "启动内核后读取实际出口";
+  $("#nodeCurrent").textContent = core.currentNode || "尚未选择";
+  $("#coreEngineSummary").textContent = `${core.version || "尚未安装"} · ${service}`;
+  // 侧栏反映系统接入，不再以“内核运行”暗示已启用代理。
+  $("#sidebarStatus").textContent = core.state === "unknown" ? "控制服务未连接" : access ? "系统代理已接入" : ready ? "内核运行 · 未接入" : core.state === "not_installed" ? "尚未安装内核" : "代理服务未就绪";
+  $("#sidebarDot").className = `status-dot ${access ? "online" : ready ? "warning" : ""}`;
+}
 async function coreAction() {
   if (state.installing || state.connecting) return;
   if (!state.overview) { toast("请先恢复控制服务连接并刷新状态", "error"); return; }
@@ -239,18 +341,22 @@ async function coreOnlyAction(action, button) {
 // 三条检测路径独立呈现。旧结果一律降为中性色，不沿用上一次的绿色结论。
 function renderConnectivity(data) {
   const report = data.connectivity;
-  const stale = report && (report.stale || !report.checkedAt || Date.now() - Date.parse(report.checkedAt) > 120000);
-  const summary = stale && data.core?.state === "running" && data.proxyPortListening
+  const stale = Boolean(report) && connectivityStale(data);
+  const invalidSuccess = data.connection?.level === "ok" && connectivityStale(data);
+  const summary = (stale || invalidSuccess) && data.core?.state === "running" && data.proxyPortListening
     ? {level:"warning", title:"代理服务已启动 · 外网待检测", detail:"旧结果已失效，请重新检测。", nextCommand:"/proxy check"}
-    : data.connection || {level:"warning",title:"外网尚未确认",detail:"请更新后台服务后检测。",nextCommand:"/proxy check"};
+    : invalidSuccess
+      ? {level:"idle",title:"代理服务未就绪 · 当前外网未确认",detail:"旧检测不代表当前网络状态，请启动服务后重测。",nextCommand:"/connect"}
+      : data.connection || {level:"warning",title:"外网尚未确认",detail:"请启动服务后检测。",nextCommand:"/proxy check"};
   $("#heroBadge").className = `badge badge-${summary.level === "ok" ? "running" : summary.level === "error" ? "error" : summary.level === "warning" ? "warning" : "muted"}`;
   $("#heroBadge").textContent = ({ok:"最近检测通过",error:"需要处理",warning:"需要确认",idle:"尚未就绪"})[summary.level] || "需要确认";
   $("#heroNode").textContent = summary.title;
   $("#heroDescription").textContent = summary.detail;
   $("#connectionNext").textContent = `下一步  ${summary.nextCommand}`;
   $("#connectivityTime").textContent = report
-    ? `${stale ? "结果已失效" : "最近检测"} · ${new Date(report.checkedAt).toLocaleString()}${stale ? ` · ${report.staleReason || "超过 2 分钟，请重新检测"}` : " · 2 分钟内有效"}`
+    ? `${stale ? "结果已失效" : "最近检测"} · ${Number.isFinite(Date.parse(report.checkedAt)) ? new Date(report.checkedAt).toLocaleString() : "检测时间未确认"}${stale ? ` · ${report.staleReason || "超过 2 分钟，请重新检测"}` : " · 2 分钟内有效"}`
     : "尚未检测 · 不会自动发送外网请求";
+  $("#connectionHero").dataset.level = summary.level || "idle";
   const container = $("#connectivityRoutes");
   container.replaceChildren();
   const routes = [{id:"direct",label:"本机直连",hint:"作为对照，不使用 HTTP 代理；系统 VPN / TUN 仍可能影响路由。"}, {id:"entry",label:"日常代理入口",hint:"通过本地代理端口，验证当前模式和规则下的访问。"}, {id:"node",label:"选中节点出口",hint:"固定通过 PROXY 策略组，单独验证远端节点。"}];
@@ -280,7 +386,7 @@ async function checkConnectivity() {
   setBusy(button, true, "正在检测，约 10–20 秒…");
   try {
     const report = await api("/api/v1/connectivity/check", {method:"POST"});
-    const passed = !report.stale && report.routes.filter(route => route.id !== "direct").every(route => route.state === "ok");
+    const passed = proxyChecksPassed(report);
     toast(passed ? "检测完成，请查看接入状态与各路径结果" : "检测完成：有未通过或未检测的路径，请查看详情", passed ? "success" : "error");
   } catch (error) { toast(`检测未完成：${error.message}`, "error"); }
   finally { state.checkingConnectivity = false; setBusy(button, false); await refreshOverview(true); }
@@ -392,54 +498,127 @@ async function streamInstall() {
   } finally { await reader.cancel(); reader.releaseLock(); }
 }
 
+// 同一列表只保留一个在途读取，避免切页和测速时旧响应覆盖新数据。
 async function loadNodes() {
-  const list = $("#nodeList");
-  list.className = "table-body empty-state";
-  list.textContent = "正在读取节点…";
-  try {
-    state.nodes = await api("/api/v1/nodes");
-	state.delays = {}; // 重新读取节点时以最新内核历史为准，不沿用页面内旧测速值。
-    $("#navNodeCount").textContent = state.nodes.length;
-    renderNodes();
-  } catch (error) {
-    list.textContent = error.message;
-  }
+  if (state.nodesLoading) return state.nodesLoading;
+  state.nodesLoading = (async () => {
+    const list = $("#nodeList");
+    list.className = "table-body empty-state";
+    list.textContent = "正在读取节点…";
+    try {
+      state.nodes = await api("/api/v1/nodes") || [];
+      state.delays = {};
+      $("#navNodeCount").textContent = state.nodes.length;
+      const select = $("#nodeProvider");
+      const previous = select.value;
+      select.replaceChildren();
+      const all = textElement("option", "全部订阅"); all.value = "all"; select.append(all);
+      [...new Set(state.nodes.map(node => node.providerName).filter(Boolean))].sort().forEach(name => {
+        const option = textElement("option", name); option.value = name; select.append(option);
+      });
+      select.value = state.nodes.some(node => node.providerName === previous) ? previous : "all";
+      renderNodes();
+    } catch (error) {
+      renderEmpty(list, "节点读取失败", error.message, {label:"重新读取",run:()=>loadNodes()});
+      $("#nodePageInfo").textContent = "读取失败";
+    }
+  })();
+  try { await state.nodesLoading; } finally { state.nodesLoading = false; }
 }
-
+function nodeDelay(node) { return node.cached ? 0 : (state.delays[node.name] ?? node.delay ?? 0); }
+function nodePassed(node) {
+  return !node.cached && nodeDelay(node) > 0 && (Object.hasOwn(state.delays,node.name) || node.alive);
+}
+function nodeTested(node) { return node.tested || node.delay > 0 || Object.hasOwn(state.delays,node.name); }
+function filteredNodes() {
+  const query = ($("#nodeSearch").value || "").trim().toLowerCase();
+  const filter = $("#nodeFilter").value || "all";
+  const provider = $("#nodeProvider").value || "all";
+  const nodes = state.nodes.filter(node =>
+    (!query || `${node.name} ${node.type} ${node.providerName || ""}`.toLowerCase().includes(query)) &&
+    (provider === "all" || node.providerName === provider) &&
+    (filter !== "alive" || nodePassed(node)) && (filter !== "untested" || !nodeTested(node)));
+  if ($("#nodeSort").value === "latency") nodes.sort((a,b) =>
+    (nodePassed(a) ? nodeDelay(a) : Infinity) - (nodePassed(b) ? nodeDelay(b) : Infinity));
+  if ($("#nodeSort").value === "name") nodes.sort((a,b) => a.name.localeCompare(b.name, "zh-CN", {numeric:true}));
+  return nodes;
+}
 function renderNodes() {
-  const query = $("#nodeSearch").value.trim().toLowerCase();
-  const filter = $("#nodeFilter").value;
-  const nodes = state.nodes.filter((node) => (!query || `${node.name} ${node.type} ${node.providerName}`.toLowerCase().includes(query)) && (filter !== "alive" || (!node.cached && (state.delays[node.name] ?? node.delay) > 0 && node.alive)));
+  const nodes = filteredNodes();
+  const pages = Math.max(1, Math.ceil(nodes.length / state.nodePageSize));
+  state.nodePage = Math.min(pages, Math.max(1, state.nodePage));
+  const start = (state.nodePage - 1) * state.nodePageSize;
+  $("#nodeTotal").textContent = state.nodes.length;
+  $("#nodeAvailable").textContent = state.nodes.filter(nodePassed).length;
+  $("#nodeCurrent").textContent = state.overview?.core?.currentNode || "尚未选择";
+  $("#nodePageInfo").textContent = nodes.length ? `第 ${start+1}–${Math.min(start+state.nodePageSize,nodes.length)} 个 · 共 ${nodes.length} 个` : "0 个符合条件的节点";
+  $("#nodePrevious").disabled = state.nodePage === 1;
+  $("#nodeNext").disabled = state.nodePage === pages;
   const list = $("#nodeList");
   list.replaceChildren();
   list.className = nodes.length ? "table-body" : "table-body empty-state";
-  if (!nodes.length) { const p=document.createElement("p");p.textContent="没有符合条件的节点。";list.append(p);return; }
-  nodes.forEach((node) => {
-    const row = document.createElement("div"); row.className="node-row";
-    const name = document.createElement("div"); name.className="node-name";
-    const avatar=document.createElement("span");avatar.className="node-avatar";avatar.textContent=node.name.trim().slice(0,1).toUpperCase()||"N";
-    const strong=document.createElement("strong");strong.textContent=node.name;name.append(avatar,strong);
-    const type=document.createElement("span");type.textContent=node.type;
-    const provider=document.createElement("span");provider.textContent=node.providerName||"—";
-    const delay=document.createElement("span");const value=node.cached?0:(state.delays[node.name]??node.delay);delay.className=`latency ${value&&value<120?"good":value&&value<250?"medium":value?"bad":""}`;delay.textContent=value?`${value} ms`:`—`;
-    const tested=node.tested||node.delay>0||Object.hasOwn(state.delays,node.name);
-    const passed=value>0&&(Object.hasOwn(state.delays,node.name)||node.alive);
-    const status=document.createElement("span");status.className=`node-status ${!node.cached&&passed?"alive":""}`;const dot=document.createElement("i");const st=document.createElement("span");st.textContent=node.cached?"离线缓存":!tested?"未测速":passed?"检查通过":"检查未通过";status.append(dot,st);
-    const action=document.createElement("button");action.className="button button-secondary node-action";action.textContent=node.cached?"请先启动内核":state.overview?.core?.currentNode===node.name?"使用中":"选择";action.disabled=node.cached||state.overview?.core?.currentNode===node.name;action.addEventListener("click",()=>selectNode(node.name,action));
-    row.append(name,type,provider,delay,status,action);list.append(row);
+  if (!nodes.length) {
+    const loaded = state.nodes.length > 0;
+    renderEmpty(list, loaded ? "没有匹配的节点" : "暂时没有可用节点",
+      loaded ? "尝试其他关键词，或清除订阅和状态筛选。" : "先添加订阅并更新节点；内核停止时可能仅显示离线缓存。",
+      {label:loaded ? "清除筛选" : "管理订阅",run:()=>loaded ? resetNodeFilters() : switchView("subscriptions")});
+    return;
+  }
+  nodes.slice(start,start+state.nodePageSize).forEach(node => {
+    const selected = !node.cached && state.overview?.core?.currentNode === node.name;
+    const row = document.createElement("div"); row.className = `node-row${selected ? " selected" : ""}`;
+    const name = document.createElement("div"); name.className = "node-name";
+    const avatar = textElement("span",node.name.trim().slice(0,1).toUpperCase() || "N","node-avatar");
+    name.append(avatar,textElement("strong",node.name));
+    const type = textElement("span",node.type || "—");
+    const provider = textElement("span",node.providerName || "—");
+    const value = nodeDelay(node);
+    const delay = textElement("span",value ? `${value} ms` : "—",`latency ${value && value<120 ? "good" : value && value<250 ? "medium" : value ? "bad" : ""}`);
+    const status = document.createElement("span"); status.className = `node-status ${nodePassed(node) ? "alive" : ""}`;
+    status.append(document.createElement("i"),textElement("span",node.cached ? "离线缓存" : !nodeTested(node) ? "未测速" : nodePassed(node) ? "检查通过" : "未通过"));
+    const action = textElement("button",node.cached ? "离线" : selected ? "使用中" : "选择","button button-secondary node-action");
+    action.disabled = node.cached || selected;
+    action.setAttribute("aria-label",`${selected ? "正在使用" : "选择"}节点 ${node.name}`);
+    action.addEventListener("click",()=>selectNode(node.name,action));
+    row.append(name,type,provider,delay,status,action); list.append(row);
   });
+}
+function resetNodeFilters() {
+  $("#nodeSearch").value = "";
+  $("#nodeFilter").value = "all";
+  $("#nodeProvider").value = "all";
+  $("#nodeSort").value = "default";
+  state.nodePage = 1;
+  renderNodes();
 }
 
 async function testNodes(button = $("#testNodesButton")) {
+  if (state.testingNodes) return;
+  state.testingNodes = true;
   setBusy(button,true,"测速中…");
   try { const delays=await api("/api/v1/nodes/test",{method:"POST"});await loadNodes();state.delays=delays;renderNodes();const values=Object.values(delays);const passed=values.filter(delay=>delay>0).length;const summary=`测速 ${values.length} 个真实节点：${passed} 个通过，${values.length-passed} 个未通过`;$("#nodeTestSummary").textContent=summary;toast(summary); }
   catch(error){toast(error.message,"error");}
-  finally{setBusy(button,false);}
+  finally{state.testingNodes=false;setBusy(button,false);}
 }
 
 async function selectNode(name,button){setBusy(button,true,"切换中…");try{await api("/api/v1/nodes/select",{method:"POST",body:JSON.stringify({name})});toast(`已切换到 ${name}`);await refreshOverview(true);renderNodes();}catch(error){toast(error.message,"error");}finally{setBusy(button,false);}}
 
-async function loadSubscriptions(){try{const [items,groups]=await Promise.all([api("/api/v1/subscriptions"),api("/api/v1/subscription-groups")]);state.subscriptionGroups=groups;renderSubscriptionGroups();renderSubscriptions(items);}catch(error){toast(error.message,"error");}}
+async function loadSubscriptions() {
+  const grid = $("#subscriptionGrid");
+  try {
+    const [items,groups] = await Promise.all([api("/api/v1/subscriptions"),api("/api/v1/subscription-groups")]);
+    state.subscriptionGroups = groups || [];
+    renderSubscriptionGroups();
+    renderSubscriptions(items || []);
+  } catch (error) {
+    grid.replaceChildren();
+    const empty = document.createElement("div"); empty.className = "empty-card";
+    renderEmpty(empty,"订阅读取失败",error.message,{label:"重试",run:loadSubscriptions});
+    grid.append(empty);
+    $("#subscriptionCount").textContent = "同步失败";
+  }
+}
+
 function renderSubscriptionGroups() {
   ["#subscriptionGroupSelect", "#subGroup"].forEach(selector => {
     const select = $(selector);
@@ -448,7 +627,7 @@ function renderSubscriptionGroups() {
     state.subscriptionGroups.forEach(group => {
       const option = document.createElement("option");
       option.value = group.name;
-      option.textContent = `${group.enabled ? "●" : "○"} ${group.name}`;
+      option.textContent = `${group.enabled ? "已启用" : "已禁用"} · ${group.name === "default" ? "默认分组" : group.name}`;
       select.append(option);
     });
     if (state.subscriptionGroups.some(group => group.name === previous)) select.value = previous;
@@ -457,10 +636,11 @@ function renderSubscriptionGroups() {
 function renderSubscriptions(items) {
   const grid = $("#subscriptionGrid");
   grid.replaceChildren();
+  $("#subscriptionCount").textContent = `${items.length} 个来源 · ${items.filter(item=>item.enabled).length} 个启用`;
   if (!items.length) {
     const empty = document.createElement("div");
     empty.className = "empty-card";
-    empty.textContent = "还没有订阅，添加一个 Clash/Mihomo 兼容地址。";
+    renderEmpty(empty,"还没有订阅来源","添加 Clash / Mihomo 兼容地址，统一管理你的连接。",{label:"添加第一个订阅",run:openSubscriptionModal});
     grid.append(empty);
     return;
   }
@@ -480,7 +660,8 @@ function renderSubscriptions(items) {
     url.textContent = sub.url;
     const meta = document.createElement("div");
     meta.className = "subscription-meta";
-    const authLabel = sub.authType.toLowerCase() === "aes" ? "AES 解密" : `${sub.authType.toUpperCase()} 认证`;
+    const auth = (sub.authType || "none").toLowerCase();
+    const authLabel = ({none:"无额外认证",basic:"Basic 认证",bearer:"Bearer 认证",token:"Token 认证",aes:"AES 解密",age:"AGE 解密"})[auth] || `${auth.toUpperCase()} 认证`;
     const updateLabel = (sub.updateVia || "direct").toLowerCase() === "proxy" ? "PROXY 出站" : "直连下载";
     [sub.group, authLabel, updateLabel, `${sub.updateInterval}s 更新`, `${sub.healthInterval}s 检查`].forEach(text => {
       const tag = document.createElement("span");
@@ -512,6 +693,7 @@ function renderSubscriptions(items) {
     addAction("更新", button => updateSubscription(sub.name, button, route.value));
     addAction("检查", button => testSubscription(sub.name, button, route.value));
     addAction("删除", () => removeSubscription(sub.name));
+    actions.lastElementChild.classList.add("subscription-delete");
     card.append(title, url, meta, actions);
     grid.append(card);
   });
@@ -581,13 +763,56 @@ async function runSubscriptionAction(action, input, button) {
 }
 async function removeSubscription(name){if(!confirm(`确认删除订阅“${name}”？缓存节点也会从配置中移除。`))return;try{await api(`/api/v1/subscriptions?name=${encodeURIComponent(name)}`,{method:"DELETE"});toast(`${name} 已删除`);await loadSubscriptions();await refreshOverview(true);}catch(error){toast(error.message,"error");}}
 
-async function loadCores(){const list=$("#coreList");try{const items=await api("/api/v1/core/installations");list.replaceChildren();list.className=items.length?"table-body":"table-body empty-state";if(!items.length){list.textContent="尚未安装任何 Mihomo 版本。";return;}items.forEach((item,index)=>{const row=document.createElement("div");row.className="core-row";const version=document.createElement("strong");version.textContent=`#${index+1} ${item.version}`;const engine=document.createElement("span");engine.textContent=item.engine;const status=document.createElement("span");status.className=`pill ${item.active?"online":""}`;status.textContent=item.active?"ACTIVE":"INSTALLED";const path=document.createElement("code");path.textContent=item.path;const actions=document.createElement("div");actions.className="inline-actions";if(!item.active){const use=document.createElement("button");use.className="button button-secondary";use.textContent="使用";use.addEventListener("click",()=>useCore(item.version,use));const remove=document.createElement("button");remove.className="button button-secondary";remove.textContent="删除";remove.addEventListener("click",()=>removeCore(item.version));actions.append(use,remove);}row.append(version,engine,status,path,actions);list.append(row);});}catch(error){list.textContent=error.message;}}
+async function loadCores() {
+  const list = $("#coreList");
+  list.className = "table-body empty-state";
+  list.textContent = "正在读取内核版本…";
+  try {
+    const items = await api("/api/v1/core/installations") || [];
+    list.replaceChildren();
+    list.className = items.length ? "table-body" : "table-body empty-state";
+    if (!items.length) {
+      renderEmpty(list,"尚未安装内核","安装最新稳定版 Mihomo，即可开始配置你的代理。");
+      return;
+    }
+    items.forEach((item,index) => {
+      const row = document.createElement("div"); row.className = "core-row";
+      const version = textElement("strong",`#${index+1} ${item.version}`);
+      const engine = textElement("span",item.engine);
+      const status = textElement("span",item.active ? "当前使用" : "已安装",`pill ${item.active ? "online" : ""}`);
+      const path = textElement("code",item.path);
+      const actions = document.createElement("div"); actions.className = "inline-actions";
+      if (!item.active) {
+        const use = textElement("button","使用","button button-secondary");
+        use.addEventListener("click",()=>useCore(item.version,use));
+        const remove = textElement("button","删除","button button-danger");
+        remove.addEventListener("click",()=>removeCore(item.version));
+        actions.append(use,remove);
+      }
+      row.append(version,engine,status,path,actions); list.append(row);
+    });
+  } catch (error) { renderEmpty(list,"内核版本读取失败",error.message,{label:"重试",run:loadCores}); }
+}
+
 async function useCore(version,button){setBusy(button,true,"切换中…");try{await api("/api/v1/core/use",{method:"POST",body:JSON.stringify({reference:version})});toast(`已切换到 ${version}`);await loadCores();await refreshOverview(true);}catch(error){toast(error.message,"error");}finally{setBusy(button,false);}}
 async function removeCore(version){if(!confirm(`确认删除 Mihomo ${version}？`))return;try{await api(`/api/v1/core/installations?reference=${encodeURIComponent(version)}`,{method:"DELETE"});toast(`${version} 已删除`);await loadCores();}catch(error){toast(error.message,"error");}}
 
-async function loadRouting(){try{state.routing=await api("/api/v1/routing");renderRouting();}catch(error){toast(error.message,"error");}}
+async function loadRouting() {
+  try {
+    state.routing = await api("/api/v1/routing");
+    renderRouting();
+  } catch (error) {
+    $("#routingActive").textContent = "读取失败";
+    const profiles = $("#routeProfiles"); profiles.replaceChildren();
+    const empty = document.createElement("div"); empty.className = "empty-card";
+    renderEmpty(empty,"路由策略读取失败",error.message,{label:"重试",run:loadRouting});
+    profiles.append(empty);
+  }
+}
+
 function renderRouting() {
   const routing = state.routing;
+  $("#routingActive").textContent = `当前：${profileLabel(routing.activeProfile)}`;
   const profiles = $("#routeProfiles");
   profiles.replaceChildren();
   // Go 的空切片可能编码成 null；无规则组的 Global/Direct 是有效配置，不能使整页渲染中断。
@@ -597,9 +822,9 @@ function renderRouting() {
     card.className = `subscription-card ${active ? "profile-active" : ""}`;
     const title = document.createElement("div");
     title.className = "subscription-title";
-    const heading = document.createElement("h3"); heading.textContent = profile.name;
+    const heading = document.createElement("h3"); heading.textContent = profileLabel(profile.name);
     const badge = document.createElement("span"); badge.className = `pill ${active ? "online" : ""}`;
-    badge.textContent = active ? "ACTIVE" : profile.defaultAction.toUpperCase();
+    badge.textContent = active ? "使用中" : ({proxy:"默认代理",direct:"默认直连",reject:"默认拒绝"})[profile.defaultAction] || profile.defaultAction;
     title.append(heading, badge);
     const description = document.createElement("p"); description.className = "subscription-url";
     const names = profile.groups || [];
@@ -607,7 +832,8 @@ function renderRouting() {
     const button = document.createElement("button"); button.className = "button button-secondary";
     button.textContent = "应用配置"; button.disabled = active;
     button.addEventListener("click", () => useRouteProfile(profile.name, button));
-    card.append(title, description, button); profiles.append(card);
+    const note = textElement("p",profileDescription(profile.name), "profile-note");
+    card.append(title, description, note, button); profiles.append(card);
   });
   const select = $("#routeRuleGroup"); select.replaceChildren();
   const groups = $("#routeGroups"); groups.replaceChildren();
@@ -634,54 +860,352 @@ function renderRouting() {
 }
 async function useRouteProfile(name,button){setBusy(button,true,"应用中…");try{await api("/api/v1/routing/profiles/use",{method:"POST",body:JSON.stringify({name})});toast(`已应用 ${name}`);await loadRouting();await refreshOverview(true);}catch(error){toast(error.message,"error");}finally{setBusy(button,false);}}
 async function addRouteRule(){const button=$("#addRouteRule");setBusy(button,true,"添加中…");const input={group:$("#routeRuleGroup").value,rule:{action:$("#routeRuleAction").value,type:$("#routeRuleType").value,value:$("#routeRuleValue").value.trim()}};try{if(!input.rule.value)throw new Error("请输入匹配值");await api("/api/v1/routing/rules",{method:"POST",body:JSON.stringify(input)});$("#routeRuleValue").value="";toast("路由规则已添加");await loadRouting();}catch(error){toast(error.message,"error");}finally{setBusy(button,false);}}
-async function removeRouteRule(group,index){try{await api(`/api/v1/routing/rules?group=${encodeURIComponent(group)}&index=${index}`,{method:"DELETE"});toast("规则已删除");await loadRouting();}catch(error){toast(error.message,"error");}}
+async function removeRouteRule(group,index){if(!confirm(`删除规则组“${group}”中的第 ${index} 条规则？此操作会重载内核。`))return;try{await api(`/api/v1/routing/rules?group=${encodeURIComponent(group)}&index=${index}`,{method:"DELETE"});toast("规则已删除");await loadRouting();}catch(error){toast(error.message,"error");}}
 
-async function runDoctor(){const button=$("#runDoctorButton");setBusy(button,true,"检查中…");try{const items=await api("/api/v1/doctor");const list=$("#doctorList");list.replaceChildren();items.forEach(item=>{const row=document.createElement("div");row.className=`doctor-item ${item.status}`;const icon=document.createElement("span");icon.className="doctor-icon";icon.textContent=item.status==="ok"?"✓":item.status==="warning"?"!":"×";const name=document.createElement("strong");name.textContent=item.name;const message=document.createElement("span");message.className="doctor-message";message.textContent=item.message;row.append(icon,name,message);list.append(row);});}catch(error){toast(error.message,"error");}finally{setBusy(button,false);}}
-async function loadLogs(){try{const lines=await api("/api/v1/logs?limit=300");const output=$("#logOutput");output.textContent=lines.length?lines.join("\n"):"暂时没有日志。";output.scrollTop=output.scrollHeight;}catch(error){$("#logOutput").textContent=error.message;}}
-async function loadSettings(){try{const [settings,security]=await Promise.all([api("/api/v1/settings"),api("/api/v1/web/security")]);$("#settingPort").value=settings.mixedPort;$("#settingMode").value=settings.mode;$("#settingLAN").checked=settings.allowLAN;$("#settingTun").checked=settings.tunEnabled;$("#settingDownloadProxy").value=settings.downloadProxy||"";$("#settingDownloadRetry").value=settings.downloadRetry||4;renderWebSecurity(security);}catch(error){toast(error.message,"error");}}
-function renderWebSecurity(security){state.authEnabled=security.authEnabled;const badge=$("#webAuthBadge");badge.className=`pill ${security.authEnabled?"online":""}`;badge.textContent=security.authEnabled?"TOKEN ENABLED":"OPEN ACCESS";$("#webSecurityWarning").classList.toggle("danger",!security.authEnabled);if(!security.authEnabled){state.token="";sessionStorage.removeItem("kivo_token");}}
-
-function openSubscriptionModal(){const modal=$("#subscriptionModal");modal.classList.add("active");modal.setAttribute("aria-hidden","false");setTimeout(()=>$("#subName").focus(),20);}
-function closeSubscriptionModal(){const modal=$("#subscriptionModal");modal.classList.remove("active");modal.setAttribute("aria-hidden","true");$("#subscriptionError").textContent="";}
-
-function bindEvents(){
-  $$(".nav-item").forEach(item=>item.addEventListener("click",()=>switchView(item.dataset.view)));
-  $$('[data-goto]').forEach(item=>item.addEventListener("click",()=>switchView(item.dataset.goto)));
-  $("#mobileMenu").addEventListener("click",()=>$(".sidebar").classList.toggle("open"));
-  $("#refreshButton").addEventListener("click",async()=>{await refreshOverview();switchView(state.activeView);});
-  $("#quickStartButton").addEventListener("click",coreAction);$("#heroAction").addEventListener("click",coreAction);
-  $("#systemProxyOn").addEventListener("click",()=>systemProxyAction("on"));
-  $("#systemProxyOff").addEventListener("click",()=>systemProxyAction("off"));
-  $("#systemProxyRecover").addEventListener("click",()=>systemProxyAction("recover"));
-  $("#systemProxyForce").addEventListener("click",()=>systemProxyAction("recover",true));
-  $$('[data-core-action]').forEach(button=>button.addEventListener("click",()=>coreOnlyAction(button.dataset.coreAction,button)));
-  $("#checkConnectivityButton").addEventListener("click",checkConnectivity);
-  $("#proxySetupButton").addEventListener("click",showProxyGuide);
-  $("#closeProxyGuide").addEventListener("click",()=>{$("#proxyGuide").hidden=true;$("#proxySetupButton").setAttribute("aria-expanded","false");$("#proxySetupButton").focus();});
-  $("#quickTest").addEventListener("click",async()=>{switchView("nodes");await testNodes();});
-  $("#copyProxyButton").addEventListener("click",async()=>{const port=state.overview?.core?.mixedPort||17890;await navigator.clipboard.writeText(`http://127.0.0.1:${port}`);toast("代理地址已复制");});
-  $("#nodeSearch").addEventListener("input",renderNodes);$("#nodeFilter").addEventListener("change",renderNodes);$("#testNodesButton").addEventListener("click",()=>testNodes());
-  $("#addSubscriptionButton").addEventListener("click",openSubscriptionModal);$$('[data-close-modal]').forEach(item=>item.addEventListener("click",closeSubscriptionModal));
-  $("#useSubscriptionGroup").addEventListener("click",async()=>{const name=$("#subscriptionGroupSelect").value;try{await api("/api/v1/subscription-groups/action",{method:"POST",body:JSON.stringify({name,action:"use"})});toast(`已独占启用 ${name}`);await loadSubscriptions();await refreshOverview(true);}catch(error){toast(error.message,"error");}});
-  $("#updateSubscriptionGroup").addEventListener("click",event=>updateSubscriptionBatch($("#subscriptionGroupSelect").value,event.currentTarget));
-  $("#updateAllSubscriptions").addEventListener("click",event=>updateSubscriptionBatch("",event.currentTarget));
-  $("#testSubscriptionGroup").addEventListener("click",event=>testSubscriptionBatch($("#subscriptionGroupSelect").value,event.currentTarget));
-  $("#testAllSubscriptions").addEventListener("click",event=>testSubscriptionBatch("",event.currentTarget));
-  $("#createSubscriptionGroup").addEventListener("click",async()=>{const name=$("#newSubscriptionGroup").value.trim();if(!name)return;try{await api("/api/v1/subscription-groups",{method:"POST",body:JSON.stringify({name})});$("#newSubscriptionGroup").value="";toast(`分组 ${name} 已创建`);await loadSubscriptions();}catch(error){toast(error.message,"error");}});
-  $("#installLatestCore").addEventListener("click",event=>installCore(event.currentTarget));
-  $("#addRouteRule").addEventListener("click",addRouteRule);
-  $("#subAuth").addEventListener("change",()=>{const type=$("#subAuth").value;$("#subUsernameRow").classList.toggle("hidden",type!=="basic");$("#subSecretRow").classList.toggle("hidden",type==="none");$("#subSecretLabel").textContent=type==="aes"?"AES 解密密码":type==="age"?"AGE 私钥":"密码或 Token";});
-  $("#runDoctorButton").addEventListener("click",runDoctor);$("#refreshLogsButton").addEventListener("click",loadLogs);
-  $("#themeButton").addEventListener("click",()=>{const next=document.documentElement.dataset.theme==="light"?"dark":"light";document.documentElement.dataset.theme=next;localStorage.setItem("kivo_theme",next);});
-  $("#loginForm").addEventListener("submit",async(event)=>{event.preventDefault();state.token=$("#loginSecret").value.trim();try{await api("/api/v1/session/verify",{method:"POST"});sessionStorage.setItem("kivo_token",state.token);hideLogin();await bootstrap();}catch(error){state.token="";$("#loginError").textContent="密钥不正确，请检查 config.json。";}});
-  $("#subscriptionForm").addEventListener("submit",async(event)=>{event.preventDefault();const button=event.submitter;setBusy(button,true,"添加中…");const input={name:$("#subName").value.trim(),url:$("#subURL").value.trim(),authType:$("#subAuth").value,username:$("#subUsername").value,secret:$("#subSecret").value,updateVia:$("#subUpdateVia").value,group:$("#subGroup").value,updateInterval:Number($("#subInterval").value),healthInterval:Number($("#subHealth").value),healthCheckURL:"https://www.gstatic.com/generate_204",additionalPrefix:$("#subPrefix").value};try{await api("/api/v1/subscriptions",{method:"POST",body:JSON.stringify(input)});toast(`订阅 ${input.name} 已添加`);event.target.reset();closeSubscriptionModal();await loadSubscriptions();await refreshOverview(true);}catch(error){$("#subscriptionError").textContent=error.message;}finally{setBusy(button,false);}});
-  $("#settingsForm").addEventListener("submit",async(event)=>{event.preventDefault();const button=event.submitter;setBusy(button,true,"应用中…");const settings={listen:state.overview?.webAddress||"127.0.0.1:9099",mixedPort:Number($("#settingPort").value),mode:$("#settingMode").value,allowLAN:$("#settingLAN").checked,tunEnabled:$("#settingTun").checked,downloadProxy:$("#settingDownloadProxy").value.trim(),downloadRetry:Number($("#settingDownloadRetry").value)};try{await api("/api/v1/settings",{method:"PATCH",body:JSON.stringify(settings)});toast("设置已保存并应用");await refreshOverview(true);}catch(error){toast(error.message,"error");}finally{setBusy(button,false);}});
-  $("#webSecurityForm").addEventListener("submit",async(event)=>{event.preventDefault();const button=event.submitter;const nextToken=$("#settingWebToken").value.trim();$("#webSecurityError").textContent="";if(!nextToken&&state.authEnabled&&!confirm("确认关闭 Web Token 鉴权？任何能访问控制台地址的设备都将拥有完整管理权限。"))return;setBusy(button,true,"保存中…");try{const security=await api("/api/v1/web/security",{method:"PATCH",body:JSON.stringify({token:nextToken})});state.token=nextToken;if(nextToken)sessionStorage.setItem("kivo_token",nextToken);else sessionStorage.removeItem("kivo_token");$("#settingWebToken").value="";renderWebSecurity(security);toast(nextToken?"新的 Web Token 已立即生效":"Web Token 鉴权已关闭","success");}catch(error){$("#webSecurityError").textContent=error.message;}finally{setBusy(button,false);}});
-  window.addEventListener("hashchange",()=>{const name=location.hash.slice(1);if(document.querySelector(`#view-${name}`))switchView(name)});
+async function runDoctor() {
+  const button = $("#runDoctorButton");
+  if (state.doctorBusy) return;
+  state.doctorBusy = true; setBusy(button,true,"检查中…");
+  $("#doctorSummary").textContent = "正在检查当前主机的安装、配置与运行环境…";
+  try {
+    const items = await api("/api/v1/doctor") || [];
+    const list = $("#doctorList"); list.replaceChildren();
+    const issues = items.filter(item => item.status !== "ok");
+    $("#doctorHeadline").textContent = !items.length ? "没有返回检查项目" : issues.length ? "有项目需要关注" : "环境检查通过";
+    $("#doctorSummary").textContent = `共检查 ${items.length} 项，${items.filter(item=>item.status==="ok").length} 项通过，${issues.length} 项需要关注。诊断不代表外网一定可用。`;
+    $("#doctorCheckedAt").textContent = new Date().toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"});
+    if (!items.length) renderEmpty(list,"暂无检查结果","可再次运行诊断，或查看内核日志。");
+    items.forEach(item => {
+      const row = document.createElement("div"); row.className = `doctor-item ${["ok","warning","error"].includes(item.status) ? item.status : "warning"}`;
+      const icon = textElement("span",item.status==="ok"?"✓":item.status==="warning"?"!":"×","doctor-icon");
+      const content = document.createElement("div");
+      content.append(textElement("strong",item.name),textElement("p",item.message));
+      row.append(icon,content); list.append(row);
+    });
+  } catch (error) {
+    $("#doctorHeadline").textContent = "诊断未完成";
+    $("#doctorSummary").textContent = error.message;
+    toast(error.message,"error");
+  } finally { state.doctorBusy = false; setBusy(button,false); }
+}
+// 不强制抢走用户阅读较早日志的位置；只有接近底部时才跟随新输出。
+function renderLogs() {
+  const output = $("#logOutput");
+  const atBottom = output.scrollHeight - output.scrollTop - output.clientHeight < 55;
+  const position = output.scrollTop;
+  const query = ($("#logSearch").value || "").trim().toLowerCase();
+  const lines = state.logs.filter(line => !query || line.toLowerCase().includes(query));
+  output.textContent = lines.length ? lines.join("\n") : query ? "没有匹配的日志。" : "暂时没有内核日志。启动内核后，输出将在这里显示。";
+  $("#logCount").textContent = query ? `${lines.length} / ${state.logs.length} 条` : `${state.logs.length} 条`;
+  output.scrollTop = atBottom ? output.scrollHeight : position;
+}
+async function loadLogs() {
+  if (state.logsLoading) return;
+  state.logsLoading = true;
+  try {
+    state.logs = await api("/api/v1/logs?limit=300") || [];
+    renderLogs();
+    $("#logUpdatedAt").textContent = `最近同步 ${new Date().toLocaleTimeString([], {hour:"2-digit",minute:"2-digit",second:"2-digit"})}`;
+  } catch (error) {
+    $("#logUpdatedAt").textContent = "同步失败";
+    if (!state.logs.length) $("#logOutput").textContent = error.message;
+    else $("#logUpdatedAt").textContent = "同步失败 · 保留上次日志";
+  } finally { state.logsLoading = false; }
+}
+async function copyText(value, message) {
+  try {
+    if (!navigator.clipboard?.writeText) throw new Error("当前浏览器或连接不支持剪贴板，请手动复制。");
+    await navigator.clipboard.writeText(value);
+    toast(message);
+  } catch (error) { toast(error.message,"error"); }
+}
+function downloadLogs() {
+  if (!state.logs.length) { toast("暂时没有日志可导出","error"); return; }
+  // 导出只在浏览器本地生成，不向外部服务器上传日志。
+  const url = URL.createObjectURL(new Blob([state.logs.join("\n")],{type:"text/plain;charset=utf-8"}));
+  const link = document.createElement("a"); link.href = url;
+  link.download = `kivo-mihomo-${new Date().toISOString().slice(0,10)}.log`;
+  link.click(); setTimeout(()=>URL.revokeObjectURL(url),1000);
+}
+function profileLabel(name) {
+  return ({"rule":"规则分流","global":"全局代理","direct":"全部直连","bypass-cn":"绕过大陆","proxy-only":"仅指定走代理","bypass-list":"仅指定不代理"})[name] || name || "未选择";
+}
+function profileDescription(name) {
+  return ({"rule":"按规则匹配流量，未命中时默认代理。","global":"未命中的流量默认走代理。","direct":"未命中的流量默认直连。","bypass-cn":"中国大陆相关流量直连，其余流量走代理。","proxy-only":"只让匹配规则的流量通过代理。","bypass-list":"为默认代理的流量设置直连例外。"})[name] || "按规则组顺序匹配，未命中时使用默认动作。";
 }
 
-async function bootstrap(){clearInterval(state.overviewTimer);clearInterval(state.logsTimer);await refreshOverview(true);const initial=location.hash.slice(1)||"overview";switchView(document.querySelector(`#view-${initial}`)?initial:"overview");state.overviewTimer=setInterval(()=>{if(document.visibilityState==="visible")refreshOverview(true)},5000);state.logsTimer=setInterval(()=>{if(state.activeView==="logs"&&$("#autoLogs").checked)loadLogs()},3000);}
+async function loadSettings() {
+  try {
+    const [settings,security] = await Promise.all([api("/api/v1/settings"),api("/api/v1/web/security")]);
+    state.settings = settings;
+    $("#settingPort").value = settings.mixedPort;
+    $("#settingMode").value = settings.mode;
+    $("#settingLAN").checked = settings.allowLAN;
+    $("#settingTun").checked = settings.tunEnabled;
+    $("#settingDownloadProxy").value = settings.downloadProxy || "";
+    $("#settingDownloadRetry").value = settings.downloadRetry || 4;
+    state.settingsDirty = false;
+    renderWebSecurity(security);
+    $("#settingsForm button[type='submit']").disabled = false;
+  } catch (error) {
+    $("#settingsForm button[type='submit']").disabled = true;
+    toast(`设置读取失败，保存已禁用：${error.message}`,"error");
+  }
+}
+function renderWebSecurity(security) {
+  state.authEnabled = security.authEnabled;
+  const badge = $("#webAuthBadge");
+  badge.className = `pill ${security.authEnabled ? "online" : ""}`;
+  badge.textContent = security.authEnabled ? "已开启鉴权" : "无需 Token";
+  $("#webSecurityWarning").classList.toggle("danger",!security.authEnabled);
+  if (!security.authEnabled) {
+    state.token = "";
+    try { sessionStorage.removeItem("kivo_token"); } catch { /* 凭据已在内存清空。 */ }
+  }
+}
 
-document.documentElement.dataset.theme=renamedPreference(localStorage,"kivo_theme","proxypilot_theme")||"dark";
+// 对话框保留打开前焦点；Esc 关闭、Tab 限制在对话框内，避免键盘进入遮罩后的页面。
+function updateSubscriptionAuthFields() {
+  const type = $("#subAuth").value;
+  $("#subUsernameRow").classList.toggle("hidden",type !== "basic");
+  $("#subSecretRow").classList.toggle("hidden",type === "none");
+  $("#subSecretLabel").textContent = type === "aes" ? "AES 解密密码" : type === "age" ? "AGE 私钥" : "密码或 Token";
+}
+function openSubscriptionModal() {
+  state.modalReturnFocus = document.activeElement;
+  const modal = $("#subscriptionModal");
+  $("#subscriptionError").textContent = "";
+  updateSubscriptionAuthFields();
+  modal.classList.add("active"); modal.setAttribute("aria-hidden","false");
+  document.body.classList.add("modal-open");
+  $(".app-shell").inert = true;
+  $("#subName").focus();
+  if (!state.subscriptionGroups.length) loadSubscriptions();
+}
+function closeSubscriptionModal() {
+  if (state.addingSubscription) return;
+  const modal = $("#subscriptionModal");
+  modal.classList.remove("active"); modal.setAttribute("aria-hidden","true");
+  document.body.classList.remove("modal-open");
+  $(".app-shell").inert = $("#loginOverlay").classList.contains("active");
+  $("#subscriptionError").textContent = "";
+  state.modalReturnFocus?.focus();
+}
+function handleDialogKey(event) {
+  const login = $("#loginOverlay").classList.contains("active");
+  const modal = $("#subscriptionModal").classList.contains("active");
+  if (event.key === "Escape") {
+    if (modal && !login) { event.preventDefault(); closeSubscriptionModal(); }
+    else if ($(".sidebar").classList.contains("open")) { setSidebarOpen(false); $("#mobileMenu").focus(); }
+    return;
+  }
+  if (event.key !== "Tab" || (!login && !modal)) return;
+  const dialog = $(login ? "#loginForm" : "#subscriptionForm");
+  const focusable = [...dialog.querySelectorAll('button:not(:disabled),input:not(:disabled),select:not(:disabled),summary,[tabindex="0"]')].filter(item=>item.getClientRects().length);
+  if (!focusable.length) return;
+  const first = focusable[0], last = focusable[focusable.length-1];
+  if (event.shiftKey && (document.activeElement === first || !dialog.contains(document.activeElement))) { event.preventDefault(); last.focus(); }
+  else if (!event.shiftKey && (document.activeElement === last || !dialog.contains(document.activeElement))) { event.preventDefault(); first.focus(); }
+}
+
+// 将表单事务与事件绑定分离，让页面操作可独立测试和扩展。
+async function handleLoginSubmit(event) {
+  event.preventDefault();
+  if (state.loggingIn) return;
+  state.loggingIn = true;
+  const button = event.submitter;
+  setBusy(button,true,"正在连接…");
+  state.token = $("#loginSecret").value.trim();
+  try {
+    await api("/api/v1/session/verify",{method:"POST"});
+    persistPreference(sessionStorage,"kivo_token",state.token);
+    $("#loginSecret").value = "";
+    hideLogin();
+    await bootstrap();
+  } catch (error) {
+    state.token = "";
+    $("#loginError").textContent = error.message === "认证失败" ? "Token 不正确或已失效，请确认服务主机的配置。" : `无法连接控制服务：${error.message}`;
+  } finally { state.loggingIn = false; setBusy(button,false); }
+}
+async function handleSubscriptionSubmit(event) {
+  event.preventDefault();
+  if (state.addingSubscription) return;
+  state.addingSubscription = true;
+  const button = event.submitter;
+  setBusy(button,true,"添加中…");
+  $("#subscriptionError").textContent = "";
+  const authType = $("#subAuth").value;
+  const input = {
+    name:$("#subName").value.trim(),url:$("#subURL").value.trim(),authType,
+    username:authType === "basic" ? $("#subUsername").value : "",
+    secret:authType === "none" ? "" : $("#subSecret").value,
+    updateVia:$("#subUpdateVia").value,group:$("#subGroup").value,
+    updateInterval:Number($("#subInterval").value),healthInterval:Number($("#subHealth").value),
+    healthCheckURL:"https://www.gstatic.com/generate_204",additionalPrefix:$("#subPrefix").value,
+  };
+  try {
+    await api("/api/v1/subscriptions",{method:"POST",body:JSON.stringify(input)});
+    toast(`订阅 ${input.name} 已添加`);
+    event.target.reset();
+    state.addingSubscription = false;
+    closeSubscriptionModal();
+    await loadSubscriptions();
+    await refreshOverview(true);
+  } catch (error) { $("#subscriptionError").textContent = error.message; }
+  finally { state.addingSubscription = false; setBusy(button,false); }
+}
+async function handleSettingsSubmit(event) {
+  event.preventDefault();
+  if (state.settingsSaving) return;
+  if (!state.settings) { toast("请先刷新并成功读取设置，再保存。","error"); return; }
+  state.settingsSaving = true;
+  const button = event.submitter;
+  setBusy(button,true,"应用中…");
+  const settings = {
+    // 此页面不编辑控制台监听地址；保留持久配置，而不是写入 serve --listen 的临时覆盖。
+    listen:state.settings.listen,
+    mixedPort:Number($("#settingPort").value),mode:$("#settingMode").value,
+    allowLAN:$("#settingLAN").checked,tunEnabled:$("#settingTun").checked,
+    downloadProxy:$("#settingDownloadProxy").value.trim(),downloadRetry:Number($("#settingDownloadRetry").value),
+  };
+  try {
+    state.settings = await api("/api/v1/settings",{method:"PATCH",body:JSON.stringify(settings)});
+    state.settingsDirty = false;
+    toast("设置已保存并应用");
+    await refreshOverview(true);
+  } catch (error) { toast(error.message,"error"); }
+  finally { state.settingsSaving = false; setBusy(button,false); }
+}
+async function handleWebSecuritySubmit(event) {
+  event.preventDefault();
+  if (state.securitySaving) return;
+  const button = event.submitter;
+  const token = $("#settingWebToken").value.trim();
+  $("#webSecurityError").textContent = "";
+  if (!token && state.authEnabled && !confirm("确认关闭 Web Token 鉴权？任何能访问控制台地址的设备都将拥有完整管理权限。")) return;
+  state.securitySaving = true;
+  setBusy(button,true,"保存中…");
+  try {
+    const security = await api("/api/v1/web/security",{method:"PATCH",body:JSON.stringify({token})});
+    state.token = token;
+    // 空字符串是明确的清空标记，避免旧名称的偏好再次迁移出旧凭据。
+    persistPreference(sessionStorage,"kivo_token",token);
+    $("#settingWebToken").value = "";
+    renderWebSecurity(security);
+    toast(token ? "新的 Web Token 已立即生效" : "Web Token 鉴权已关闭");
+  } catch (error) { $("#webSecurityError").textContent = error.message; }
+  finally { state.securitySaving = false; setBusy(button,false); }
+}
+async function useSubscriptionGroup(event) {
+  const name = $("#subscriptionGroupSelect").value;
+  if (!name || state.groupBusy) return;
+  if (!confirm(`独占使用“${name}”组？其他分组与组外订阅会停用，运行中的内核将重载。`)) return;
+  state.groupBusy = true; setBusy(event.currentTarget,true);
+  try {
+    await api("/api/v1/subscription-groups/action",{method:"POST",body:JSON.stringify({name,action:"use"})});
+    toast(`已独占启用 ${name}`);
+    await loadSubscriptions(); await refreshOverview(true);
+  } catch (error) { toast(error.message,"error"); }
+  finally { state.groupBusy = false; setBusy($("#useSubscriptionGroup"),false); }
+}
+async function createSubscriptionGroup(event) {
+  const name = $("#newSubscriptionGroup").value.trim();
+  if (!name || state.groupBusy) return;
+  state.groupBusy = true; setBusy(event.currentTarget,true);
+  try {
+    await api("/api/v1/subscription-groups",{method:"POST",body:JSON.stringify({name})});
+    $("#newSubscriptionGroup").value = "";
+    toast(`分组 ${name} 已创建`);
+    await loadSubscriptions();
+  } catch (error) { toast(error.message,"error"); }
+  finally { state.groupBusy = false; setBusy($("#createSubscriptionGroup"),false); }
+}
+function bindEvents() {
+  const on = (selector,event,handler) => $(selector).addEventListener(event,handler);
+  $$(".nav-item").forEach(item=>item.addEventListener("click",()=>switchView(item.dataset.view)));
+  $$("[data-goto]").forEach(item=>item.addEventListener("click",()=>switchView(item.dataset.goto)));
+  on("#mobileMenu","click",()=>setSidebarOpen(!$(".sidebar").classList.contains("open")));
+  on("#sidebarBackdrop","click",()=>setSidebarOpen(false));
+  window.matchMedia("(max-width:760px)").addEventListener("change",()=>setSidebarOpen(false));
+  document.addEventListener("keydown",handleDialogKey);
+  on("#subscriptionModal","click",event=>{if(event.target===event.currentTarget)closeSubscriptionModal();});
+  on("#refreshButton","click",async event=>{
+    if (state.activeView === "settings" && state.settingsDirty && !confirm("刷新会重新读取设置，丢弃尚未保存的修改。继续吗？")) return;
+    setBusy(event.currentTarget,true,"刷新中…");
+    try { await refreshOverview(); await loadActiveView(); }
+    finally { setBusy($("#refreshButton"),false); }
+  });
+  on("#quickStartButton","click",coreAction);
+  on("#heroAction","click",coreAction);
+  on("#systemProxyOn","click",()=>systemProxyAction("on"));
+  on("#systemProxyOff","click",()=>systemProxyAction("off"));
+  on("#systemProxyRecover","click",()=>systemProxyAction("recover"));
+  on("#systemProxyForce","click",()=>systemProxyAction("recover",true));
+  $$("[data-core-action]").forEach(button=>button.addEventListener("click",()=>coreOnlyAction(button.dataset.coreAction,button)));
+  on("#checkConnectivityButton","click",checkConnectivity);
+  on("#proxySetupButton","click",showProxyGuide);
+  on("#closeProxyGuide","click",()=>{
+    $("#proxyGuide").hidden = true;
+    $("#proxySetupButton").setAttribute("aria-expanded","false");
+    $("#proxySetupButton").focus();
+  });
+  on("#quickTest","click",async()=>{switchView("nodes",{load:false});await testNodes();});
+  on("#copyProxyButton","click",()=>{
+    const port = state.overview?.core?.mixedPort;
+    if (!port) { toast("代理地址尚未确认，请刷新状态。","error"); return; }
+    copyText(`http://127.0.0.1:${port}`,"代理地址已复制");
+  });
+  on("#nodeSearch","input",()=>{state.nodePage=1;renderNodes();});
+  ["#nodeFilter","#nodeProvider","#nodeSort"].forEach(selector=>on(selector,"change",()=>{state.nodePage=1;renderNodes();}));
+  on("#nodePrevious","click",()=>{state.nodePage--;renderNodes();$("#nodeList").scrollIntoView({block:"start"});});
+  on("#nodeNext","click",()=>{state.nodePage++;renderNodes();$("#nodeList").scrollIntoView({block:"start"});});
+  on("#testNodesButton","click",()=>testNodes());
+  on("#closeSubscriptionResult","click",()=>$("#subscriptionResult").hidden=true);
+  on("#addSubscriptionButton","click",openSubscriptionModal);
+  $$("[data-close-modal]").forEach(item=>item.addEventListener("click",closeSubscriptionModal));
+  on("#useSubscriptionGroup","click",useSubscriptionGroup);
+  on("#createSubscriptionGroup","click",createSubscriptionGroup);
+  on("#updateSubscriptionGroup","click",event=>updateSubscriptionBatch($("#subscriptionGroupSelect").value,event.currentTarget));
+  on("#updateAllSubscriptions","click",event=>updateSubscriptionBatch("",event.currentTarget));
+  on("#testSubscriptionGroup","click",event=>testSubscriptionBatch($("#subscriptionGroupSelect").value,event.currentTarget));
+  on("#testAllSubscriptions","click",event=>testSubscriptionBatch("",event.currentTarget));
+  on("#installLatestCore","click",event=>installCore(event.currentTarget));
+  on("#addRouteRule","click",addRouteRule);
+  on("#subAuth","change",updateSubscriptionAuthFields);
+  on("#runDoctorButton","click",runDoctor);
+  on("#refreshLogsButton","click",loadLogs);
+  on("#logSearch","input",renderLogs);
+  on("#autoLogs","change",()=>{if($("#autoLogs").checked)loadLogs();});
+  on("#copyLogsButton","click",()=>copyText($("#logOutput").textContent,"显示的日志已复制"));
+  on("#downloadLogsButton","click",downloadLogs);
+  on("#themeButton","click",()=>{
+    const next = document.documentElement.dataset.theme==="light" ? "dark" : "light";
+    document.documentElement.dataset.theme = next;
+    persistPreference(localStorage,"kivo_theme",next);
+  });
+  on("#loginForm","submit",handleLoginSubmit);
+  on("#subscriptionForm","submit",handleSubscriptionSubmit);
+  on("#settingsForm","submit",handleSettingsSubmit);
+  on("#settingsForm","input",()=>{state.settingsDirty=true;});
+  on("#settingsForm","change",()=>{state.settingsDirty=true;});
+  on("#webSecurityForm","submit",handleWebSecuritySubmit);
+  window.addEventListener("hashchange",()=>switchView(location.hash.slice(1)));
+}
+
+async function bootstrap() {
+  clearInterval(state.overviewTimer);
+  clearInterval(state.logsTimer);
+  await refreshOverview(true);
+  switchView(location.hash.slice(1) || "overview");
+  // 页面不可见或凭据失效时停止轮询，避免重复请求和登录框抢焦点。
+  state.overviewTimer = setInterval(() => {
+    if (state.authenticated && document.visibilityState === "visible") refreshOverview(true);
+  }, 5000);
+  state.logsTimer = setInterval(() => {
+    if (state.authenticated && document.visibilityState === "visible" && state.activeView === "logs" && $("#autoLogs").checked) loadLogs();
+  }, 3000);
+}
+
+document.documentElement.dataset.theme=renamedPreference(localStorage,"kivo_theme","proxypilot_theme")||"light";
 bindEvents();
 api("/api/v1/session/verify",{method:"POST"}).then(()=>{hideLogin();bootstrap()}).catch(()=>showLogin("请输入 Web API 密钥。"));

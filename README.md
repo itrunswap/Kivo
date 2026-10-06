@@ -6,6 +6,8 @@ Kivo 使用 Go 开发，通过独立的 Mihomo 内核提供代理能力，负责
 
 原名 ProxyPilot，自 v0.2.7 起使用 Kivo 名称。已有配置可以继续使用，升级前请先停止旧后台，详见[改名与升级说明](docs/USER_MANUAL.md#28-kivo-改名升级与简短启动命令)。
 
+当前开发版已重做全部 Web 页面：清晰区分服务、系统接入与联网状态，提供节点分页筛选、订阅批量路径、规则管理和日志搜索。详见[新版 Web 说明](docs/WEB_DESIGN.md)。已发布版本以 GitHub Release 为准。
+
 ## 下载
 
 进入 [GitHub Releases](https://github.com/itrunswap/Kivo/releases) 下载对应平台的压缩包。首次发布完成前，下方“最新版”链接可能暂不可用。

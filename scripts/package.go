@@ -53,6 +53,7 @@ func packageRelease(input, output, source string) error {
 		{"docs/API.md", "docs/API.md"},
 		{"docs/ARCHITECTURE.md", "docs/ARCHITECTURE.md"},
 		{"docs/CODE_STYLE.md", "docs/CODE_STYLE.md"},
+		{"docs/WEB_DESIGN.md", "docs/WEB_DESIGN.md"},
 		{"docs/RELEASE.md", "docs/RELEASE.md"},
 		{"docs/TEST_REPORT_2026-10-06.md", "docs/TEST_REPORT_2026-10-06.md"},
 		{"CHANGELOG.md", "CHANGELOG.md"},

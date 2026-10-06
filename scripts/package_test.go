@@ -22,7 +22,7 @@ func TestPackageRelease(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	documents := []string{"README.md", "docs/USER_MANUAL.md", "docs/COMMANDS.md", "docs/API.md", "docs/ARCHITECTURE.md", "docs/CODE_STYLE.md", "docs/RELEASE.md", "docs/TEST_REPORT_2026-10-06.md", "CHANGELOG.md", "THIRD_PARTY_NOTICES.md"}
+	documents := []string{"README.md", "docs/USER_MANUAL.md", "docs/COMMANDS.md", "docs/API.md", "docs/ARCHITECTURE.md", "docs/CODE_STYLE.md", "docs/WEB_DESIGN.md", "docs/RELEASE.md", "docs/TEST_REPORT_2026-10-06.md", "CHANGELOG.md", "THIRD_PARTY_NOTICES.md"}
 	for _, name := range documents {
 		if err := os.WriteFile(filepath.Join(root, name), []byte("中文说明\n"), 0644); err != nil {
 			t.Fatal(err)

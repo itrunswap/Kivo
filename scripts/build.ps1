@@ -43,12 +43,13 @@ try {
         Write-Host "已构建 $Output"
     }
 
-    # 生成与 GitHub Release 常见格式兼容的校验清单。
-    $Checksums = Get-ChildItem -Path $DistRoot -Filter "kivo-*" -File |
-        Sort-Object Name |
+    # 只校验本次六个平台的产物。dist 中可能保留旧预览或历史程序，不能用通配符混入清单。
+    $Checksums = $Targets |
+        ForEach-Object { "kivo-$($_.OS)-$($_.Arch)$($_.Ext)" } |
+        Sort-Object |
         ForEach-Object {
-            $Hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash.ToLowerInvariant()
-            "$Hash  $($_.Name)"
+            $Hash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $DistRoot $_)).Hash.ToLowerInvariant()
+            "$Hash  $_"
         }
     Set-Content -LiteralPath (Join-Path $DistRoot "SHA256SUMS") -Value $Checksums -Encoding utf8NoBOM
     Write-Host "已生成 $(Join-Path $DistRoot 'SHA256SUMS')"

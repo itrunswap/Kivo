@@ -31,9 +31,11 @@ for TARGET in windows/amd64 windows/arm64 darwin/amd64 darwin/arm64 linux/amd64 
 done
 
 cd "$DIST_ROOT"
+# 固定白名单，避免历史预览文件被通配符收录到本次六平台校验清单。
+set -- kivo-darwin-amd64 kivo-darwin-arm64 kivo-linux-amd64 kivo-linux-arm64 kivo-windows-amd64.exe kivo-windows-arm64.exe
 if command -v sha256sum >/dev/null 2>&1; then
-  sha256sum kivo-* > SHA256SUMS
+  sha256sum "$@" > SHA256SUMS
 else
-  shasum -a 256 kivo-* > SHA256SUMS
+  shasum -a 256 "$@" > SHA256SUMS
 fi
 printf '已生成 %s\n' "$DIST_ROOT/SHA256SUMS"
