@@ -16,7 +16,8 @@ EXECUTABLE=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/Conten
 case "$EXECUTABLE" in ''|*/*|..|.) printf '应用入口无效\n' >&2; exit 1;; esac
 BINARY="$APP/Contents/MacOS/$EXECUTABLE"
 test -x "$BINARY"
-lipo -verify_arch x86_64 arm64 "$BINARY"
+# -verify_arch 后的全部参数都会被当作架构，因此输入文件必须放在前面。
+lipo "$BINARY" -verify_arch x86_64 arm64
 file "$BINARY"
 
 # ad-hoc 签名只用于本地代码完整性，不等同于 Developer ID 签名或 Apple 公证。
