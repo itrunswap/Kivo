@@ -148,6 +148,14 @@ Linux 桌面模块 `go test` / `go vet` 同样需要 `GOFLAGS=-tags=webkit2_41`�
 
 `desktop.yml` 提供五平台目标原生 CI 与下载 artifact，不自动发布 Release、创建标签或签名。配置了流程不代表已经运行成功；正式发布前须完成 Mac / Linux 原生验收。
 
+### macOS 测试包
+
+`macos-package.yml` 在桌面开发分支推送后构建 Universal 应用，检查 `x86_64` 和 `arm64` 架构，并用 `ditto` 压缩以保留 `.app` 的可执行权限和符号链接。下载 artifact 后，里面的 `kivo-desktop-darwin-universal.zip` 才是可传到 Mac 的应用压缩包；附带 `SHA256SUMS` 校验清单。
+
+在 Mac 上解压这个 ZIP，将 `Kivo.app` 拖到“应用程序”，再启动。Intel 和 Apple Silicon 使用同一个包，无需 Go / Node.js。此测试包只有 ad-hoc 本地完整性签名，不含 Apple Developer ID 签名或公证；系统可能提示无法验证开发者。不要全局关闭 Gatekeeper，遇到安全提示先核对下载来源与校验值，再由你按 macOS 的安全提示决定是否允许打开。
+
+首次测试建议验证窗口、托盘显示与恢复、连接 / 断开后的系统代理、订阅更新和退出恢复。构建通过不等于已完成 Mac 图形桌面和实际代理验收。
+
 ## 9. 当前边界
 
 可用 `node scripts/preview-desktop.mjs` 启动明确标记“演示”的浏览器交互验收页，端口默认 19435。它只模拟内存状态，不读取真实订阅、不启动内核、不更改系统代理；不能用该演示页面验证实际能否联网。

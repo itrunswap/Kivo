@@ -1,0 +1,58 @@
+name: macOS 桌面测试包
+
+on:
+  workflow_dispatch:
+  # 默认分支尚未包含桌面流程，允许桌面开发分支推送后直接原生构建。
+  push:
+    branches: [feat/desktop-client]
+    paths:
+      - desktop/**
+      - internal/**
+      - scripts/**
+      - go.mod
+      - go.sum
+      - docs/DESKTOP.md
+      - .github/workflows/macos-package.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-package-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  universal:
+    runs-on: macos-15
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    env:
+      VERSION: 0.3.2-desktop-preview
+      TARGET: darwin/universal
+      COMMIT: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version-file: desktop/go.mod
+          cache-dependency-path: desktop/go.sum
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: "24"
+      - name: 原生测试并构建 Universal 应用
+        run: |
+          export BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          sh scripts/build-desktop.sh
+      - name: 校验架构并打包
+        run: sh scripts/package-macos.sh
+      - uses: actions/upload-artifact@v7.0.1
+        with:
+          name: kivo-desktop-darwin-universal
+          # 先用 ditto 压缩，避免 artifact 直接上传 .app 后丢失执行权限和符号链接。
+          path: dist/desktop/macos/*
+          if-no-files-found: error
+          retention-days: 14
