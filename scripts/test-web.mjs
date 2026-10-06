@@ -9,14 +9,29 @@ const bootstrapOffset = source.lastIndexOf("\ndocument.documentElement.dataset.t
 assert.ok(bootstrapOffset > 0, "必须找到页面初始化边界，不能截断函数定义");
 const functions = source.slice(0, bootstrapOffset);
 
+test("参考站组件规格和离线字体随源码分发",()=>{
+  const css=readFileSync(new URL("../internal/server/assets/app.css",import.meta.url),"utf8");
+  assert.match(css,/--sidebar-width:240px/);
+  assert.match(css,/--header-height:60px/);
+  assert.match(css,/--content-width:1320px/);
+  assert.match(css,/--radius-control:8px/);
+  assert.match(css,/\.button \{[^}]*min-height:36px/);
+  assert.doesNotMatch(css,/@import|url\(["']?https?:/);
+  const font=readFileSync(new URL("../internal/server/assets/fonts/noto-sans-sc-ui.woff2",import.meta.url));
+  assert.equal(font.subarray(0,4).toString(),"wOF2");
+  assert.ok(font.length<250_000,"UI 字体子集不应引入数 MB 的全量字体");
+});
+
 function harness(response) {
   const elements = new Map();
-  const element = () => ({
+  const element = () => {
+    const classes = new Set();
+    return ({
       textContent: "", value: undefined, dataset: {}, disabled:false,
       children: [],
       get childNodes() { return this.children; },
       get lastElementChild() { return this.children.at(-1); },
-      classList: {add(){},remove(){},toggle(){},contains(){return false}},
+      classList: {add(...names){names.forEach(name=>classes.add(name));},remove(...names){names.forEach(name=>classes.delete(name));},toggle(name,force){const add=force ?? !classes.has(name);if(add)classes.add(name);else classes.delete(name);return add;},contains(name){return classes.has(name);}},
       append(...items) { this.children.push(...items); },
       replaceChildren(...items) { this.children = items; },
       removeAttribute(name) { delete this[name]; },
@@ -25,7 +40,8 @@ function harness(response) {
       focus() {},
 	  addEventListener() {},
     });
-  const document = { createElement: element, querySelector(selector) {
+  };
+  const document = { createElement: element, querySelectorAll:()=>[], documentElement:element(), body:element(), querySelector(selector) {
     if (!elements.has(selector)) elements.set(selector, element());
     return elements.get(selector);
   }};
@@ -33,6 +49,87 @@ function harness(response) {
   vm.runInContext(functions, context);
   return { elements, run:code=>vm.runInContext(code, context) };
 }
+
+test("主题默认跟随系统，非法偏好不污染样式，存储被禁用仍可切换",()=>{
+  const h=harness(null);
+  h.run('globalThis.window={matchMedia:()=>({matches:true})};globalThis.localStorage={setItem(){throw new Error("denied")}};');
+  assert.equal(h.run('validTheme("broken")'),"system");
+  assert.equal(h.run('resolvedTheme("system")'),"dark");
+  assert.equal(h.run('resolvedTheme("light")'),"light");
+  h.run('applyTheme("system")');
+  assert.match(h.elements.get("#themeSummary").textContent,/跟随系统.*深色/);
+  h.run('window.matchMedia=()=>({matches:false});applyTheme("system",false)');
+  assert.equal(h.run('document.documentElement.dataset.theme'),"light");
+  h.run('setSidebarCollapsed(true)');
+  assert.equal(h.elements.get("#sidebarToggle")["aria-expanded"],"false");
+  assert.equal(h.run('document.documentElement.dataset.sidebar'),"collapsed");
+});
+
+test("快捷搜索按多关键词匹配，只索引名称而不泄露 URL 或密码",()=>{
+  const h=harness(null);
+  h.run('state.nodes=[{name:"香港 优化 01",type:"Trojan",providerName:"日常",url:"secret-address",secret:"never-index"}];');
+  assert.equal(h.run('commandItems("香港 Trojan")[0].node'),"香港 优化 01");
+  assert.equal(h.run('commandItems("SUBSCRIPTIONS")[0].view'),"subscriptions");
+  assert.equal(h.run('commandItems("never-index").length'),0);
+  assert.equal(h.run('commandItems("secret-address").length'),0);
+  assert.equal(h.run('commandItems("").length'),8);
+  h.run('state.nodes=Array.from({length:200},(_,i)=>({name:`test-${i}`}))');
+  assert.equal(h.run('commandItems("test").length'),50);
+});
+
+test("搜索候选安全渲染，方向键首尾循环，空结果清理活动项",()=>{
+  const h=harness(null);
+  h.run('state.nodes=[{name:"<img src=x onerror=alert(1)>"}];$("#commandInput").value="img";renderCommandResults()');
+  const option=h.elements.get("#commandList").children[0];
+  assert.equal(option.children[0].textContent,"<img src=x onerror=alert(1)>");
+  h.run('$("#commandInput").value="";renderCommandResults();selectCommandResult(-1)');
+  assert.equal(h.elements.get("#commandInput")["aria-activedescendant"],"command-option-7");
+  h.run('selectCommandResult(8)');
+  assert.equal(h.elements.get("#commandInput")["aria-activedescendant"],"command-option-0");
+  h.run('$("#commandInput").value="not-existing";renderCommandResults()');
+  assert.equal(h.elements.get("#commandInput")["aria-activedescendant"],undefined);
+  assert.equal(h.run('state.commandIndex'),0);
+});
+
+test("快捷搜索选节点只定位筛选，不调用切换节点接口",()=>{
+  const h=harness(null);
+  h.run('globalThis.operations=[];closeCommandDialog=()=>{};switchView=(view)=>{state.activeView=view;operations.push(view)};renderNodes=()=>operations.push("render");state.commandResults=[{view:"nodes",node:"香港 01"}];chooseCommandResult(0)');
+  assert.equal(h.elements.get("#nodeSearch").value,"香港 01");
+  assert.equal(h.elements.get("#nodeProvider").value,"all");
+  assert.equal(h.elements.get("#nodeFilter").value,"all");
+  assert.equal(h.run('JSON.stringify(operations)'),JSON.stringify(["nodes","render"]));
+});
+
+test("斜杠不抢输入框或中文输入法，登录和订阅弹窗不被快捷键打断",()=>{
+  const h=harness(null);
+  h.run('state.authenticated=true;globalThis.opened=0;openCommandDialog=()=>opened++;globalThis.prevented=0;globalThis.keyEvent={key:"/",target:{tagName:"INPUT"},preventDefault(){prevented++}};handleShortcuts(keyEvent)');
+  assert.equal(h.run('opened'),0);
+  h.run('keyEvent.target={tagName:"BUTTON"};keyEvent.isComposing=true;handleShortcuts(keyEvent)');
+  assert.equal(h.run('opened'),0);
+  h.run('keyEvent.isComposing=false;handleShortcuts(keyEvent)');
+  assert.equal(h.run('opened'),1);
+  h.run('$("#subscriptionModal").classList.add("active");keyEvent.key="k";keyEvent.ctrlKey=true;handleShortcuts(keyEvent)');
+  assert.equal(h.run('opened'),1);
+});
+
+test("搜索和登录弹窗共享背景隔离，关闭搜索不会解除登录限制",()=>{
+  const h=harness(null);
+  h.run('$("#commandOverlay").classList.add("active");syncDialogState()');
+  assert.equal(h.elements.get(".app-shell").inert,true);
+  h.run('$("#loginOverlay").classList.add("active");closeCommandDialog(false)');
+  assert.equal(h.elements.get(".app-shell").inert,true);
+  h.run('hideLogin()');
+  assert.equal(h.elements.get(".app-shell").inert,false);
+});
+
+test("搜索对话框 Tab 循环排除负 tabindex 候选项",()=>{
+  const h=harness(null);
+  h.run('$("#commandOverlay").classList.add("active");globalThis.input=$("#commandInput");globalThis.close=$("#closeCommandButton");globalThis.option=document.createElement("button");input.tabIndex=close.tabIndex=0;option.tabIndex=-1;for(const item of [input,close,option]){item.getClientRects=()=>[{}];item.focus=()=>document.activeElement=item;}$("#commandDialog").querySelectorAll=()=>[input,close,option];$("#commandDialog").contains=(item)=>[input,close,option].includes(item);document.activeElement=close;globalThis.prevented=false;handleDialogKey({key:"Tab",preventDefault(){prevented=true}})');
+  assert.equal(h.run('document.activeElement===input'),true);
+  assert.equal(h.run('prevented'),true);
+  h.run('handleDialogKey({key:"Tab",shiftKey:true,preventDefault(){}})');
+  assert.equal(h.run('document.activeElement===close'),true);
+});
 
 test("Kivo 改名保留浏览器偏好且不复活已清空的 Token",()=>{
   const values=new Map([["proxypilot_token","old-token"]]);

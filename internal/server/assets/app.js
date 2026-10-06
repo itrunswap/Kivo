@@ -112,6 +112,7 @@ function toast(message, type = "success") {
 }
 
 function showLogin(message = "") {
+  closeCommandDialog(false);
   $("#loginError").textContent = message;
   state.authenticated = false;
   $(".app-shell").inert = true;
@@ -123,10 +124,126 @@ function showLogin(message = "") {
 function hideLogin() {
   state.authenticated = true;
   $("#loginOverlay").classList.remove("active");
-  $(".app-shell").inert = $("#subscriptionModal").classList.contains("active");
+  syncDialogState();
 }
 
 const viewTitles = {overview:"网络概览",nodes:"代理节点",subscriptions:"订阅管理",cores:"内核管理",routing:"路由策略",diagnostics:"环境诊断",logs:"运行日志",settings:"偏好设置"};
+
+// 外观与导航偏好独立于服务配置，不会重载内核。无存储权限时仍保留本次会话值。
+function validTheme(value) { return ["light","dark","system"].includes(value) ? value : "system"; }
+function resolvedTheme(value) {
+  return validTheme(value) === "system" ? (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light") : value;
+}
+function applyTheme(value, persist = true) {
+  state.themePreference = validTheme(value);
+  document.documentElement.dataset.theme = resolvedTheme(state.themePreference);
+  if (persist) persistPreference(localStorage,"kivo_theme",state.themePreference);
+  $$("[data-theme-choice]").forEach(button=>button.setAttribute("aria-pressed",String(button.dataset.themeChoice === state.themePreference)));
+  const actual = document.documentElement.dataset.theme === "dark" ? "深色" : "浅色";
+  $("#themeSummary").textContent = state.themePreference === "system" ? `跟随系统 · 当前${actual}` : `固定${actual}主题`;
+  $("#themeButton").title = `当前${actual}，点击切换`;
+}
+function setSidebarCollapsed(collapsed, persist = true) {
+  document.documentElement.dataset.sidebar = collapsed ? "collapsed" : "expanded";
+  if (persist) persistPreference(localStorage,"kivo_sidebar",collapsed ? "collapsed" : "expanded");
+  const label = collapsed ? "展开侧栏" : "折叠侧栏";
+  $("#sidebarToggle").title = label;
+  $("#sidebarToggle").setAttribute("aria-label",label);
+  $("#sidebarToggle").setAttribute("aria-expanded",String(!collapsed));
+}
+function initializeAppearance() {
+  applyTheme(renamedPreference(localStorage,"kivo_theme","proxypilot_theme"),false);
+  let collapsed = false;
+  try { collapsed = localStorage.getItem("kivo_sidebar") === "collapsed"; } catch { /* 使用默认展开状态。 */ }
+  setSidebarCollapsed(collapsed,false);
+  $$(".nav-item").forEach(item=>item.title = viewTitles[item.dataset.view]);
+  $("#commandShortcut").textContent = /Mac|iPhone|iPad/.test(navigator.platform) ? "⌘ K" : "Ctrl K";
+  window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change",()=>{
+    if (state.themePreference === "system") applyTheme("system",false);
+  });
+}
+
+// 快捷搜索只展示页面标题和已加载节点的名称，不索引订阅地址、密码或 Token。
+// Enter 在节点列表中定位，真正切换节点仍需要用户点击原来的选择按钮。
+function commandItems(query) {
+  const terms = query.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
+  const matches = text => terms.every(term=>text.toLocaleLowerCase().includes(term));
+  const pages = Object.entries(viewTitles).filter(([key,title])=>matches(`${key} ${title}`))
+    .map(([view,label])=>({view,label,detail:"页面"}));
+  const nodes = query.trim() ? state.nodes.filter(node=>matches(`${node.name} ${node.providerName || ""} ${node.type || ""}`))
+    .map(node=>({view:"nodes",node:node.name,label:node.name,detail:`节点 · ${node.providerName || "未分组"}`})) : [];
+  return [...pages,...nodes].slice(0,50);
+}
+function syncDialogState() {
+  const active = ["#loginOverlay","#subscriptionModal","#commandOverlay"].some(id=>$(id).classList.contains("active"));
+  $(".app-shell").inert = active;
+  document.body.classList.toggle("modal-open",active);
+}
+function renderCommandResults() {
+  state.commandResults = commandItems($("#commandInput").value);
+  state.commandIndex = 0;
+  const list = $("#commandList");
+  list.replaceChildren();
+  state.commandResults.forEach((result,index)=>{
+    const option = textElement("button","","command-option");
+    option.id = `command-option-${index}`;
+    option.type = "button"; option.tabIndex = -1;
+    option.setAttribute("role","option");
+    option.append(textElement("span",result.label),textElement("small",result.detail));
+    option.addEventListener("click",()=>chooseCommandResult(index));
+    list.append(option);
+  });
+  if (!state.commandResults.length) list.append(textElement("p","没有匹配结果。尝试页面名称或已加载节点的关键词。","command-empty"));
+  $("#commandCount").textContent = state.commandResults.length === 50 ? "最多显示 50 项，请细化关键词" : `${state.commandResults.length} 项 · 节点搜索仅含已加载数据`;
+  selectCommandResult(0);
+}
+function selectCommandResult(index) {
+  const count = state.commandResults?.length || 0;
+  state.commandIndex = count ? (index + count) % count : 0;
+  [...$("#commandList").children].forEach((item,i)=>item.setAttribute("aria-selected",String(count > 0 && i === state.commandIndex)));
+  if (count) {
+    $("#commandInput").setAttribute("aria-activedescendant",`command-option-${state.commandIndex}`);
+    $("#commandList").children[state.commandIndex].scrollIntoView({block:"nearest"});
+  } else $("#commandInput").removeAttribute("aria-activedescendant");
+}
+function openCommandDialog() {
+  if (!state.authenticated || $("#subscriptionModal").classList.contains("active") || $("#loginOverlay").classList.contains("active")) return;
+  setSidebarOpen(false);
+  state.commandReturnFocus = document.activeElement;
+  $("#commandInput").value = "";
+  $("#commandOverlay").classList.add("active");
+  $("#commandOverlay").setAttribute("aria-hidden","false");
+  syncDialogState(); renderCommandResults(); $("#commandInput").focus();
+}
+function closeCommandDialog(restoreFocus = true) {
+  const active = $("#commandOverlay").classList.contains("active");
+  $("#commandOverlay").classList.remove("active");
+  $("#commandOverlay").setAttribute("aria-hidden","true");
+  syncDialogState();
+  if (active && restoreFocus) state.commandReturnFocus?.focus();
+}
+function chooseCommandResult(index) {
+  const result = state.commandResults?.[index];
+  if (!result) return;
+  closeCommandDialog();
+  switchView(result.view,{load:!result.node});
+  if (result.node && state.activeView === "nodes") {
+    $("#nodeSearch").value = result.node;
+    $("#nodeProvider").value = "all"; $("#nodeFilter").value = "all";
+    state.nodePage = 1; renderNodes(); $("#nodeSearch").focus();
+  }
+}
+function isEditing(target) { return Boolean(target?.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target?.tagName || "")); }
+function handleShortcuts(event) {
+  if (event.defaultPrevented || event.isComposing || !state.authenticated) return;
+  if ($("#loginOverlay").classList.contains("active") || $("#subscriptionModal").classList.contains("active")) return;
+  if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === "k") {
+    event.preventDefault();
+    if ($("#commandOverlay").classList.contains("active")) closeCommandDialog(); else openCommandDialog();
+  } else if (!event.ctrlKey && !event.metaKey && !event.altKey && event.key === "/" && !isEditing(event.target)) {
+    event.preventDefault(); openCommandDialog();
+  }
+}
 function setSidebarOpen(open) {
   $(".sidebar").classList.toggle("open", open);
   $(".sidebar").inert = window.matchMedia("(max-width:760px)").matches && !open;
@@ -162,7 +279,7 @@ function switchView(name, {reload = false, load = true} = {}) {
   document.title = `Kivo · ${viewTitles[name]}`;
   setSidebarOpen(false);
   if (location.hash !== `#${name}`) location.hash = name;
-  if (changed) window.scrollTo({top:0,behavior:"instant"});
+  if (changed) $("#contentScroll").scrollTo?.({top:0,behavior:"instant"});
   if (load && (changed || reload)) return loadActiveView(name);
 }
 
@@ -972,6 +1089,7 @@ function updateSubscriptionAuthFields() {
   $("#subSecretLabel").textContent = type === "aes" ? "AES 解密密码" : type === "age" ? "AGE 私钥" : "密码或 Token";
 }
 function openSubscriptionModal() {
+  closeCommandDialog(false);
   state.modalReturnFocus = document.activeElement;
   const modal = $("#subscriptionModal");
   $("#subscriptionError").textContent = "";
@@ -987,21 +1105,30 @@ function closeSubscriptionModal() {
   const modal = $("#subscriptionModal");
   modal.classList.remove("active"); modal.setAttribute("aria-hidden","true");
   document.body.classList.remove("modal-open");
-  $(".app-shell").inert = $("#loginOverlay").classList.contains("active");
+  syncDialogState();
   $("#subscriptionError").textContent = "";
   state.modalReturnFocus?.focus();
 }
 function handleDialogKey(event) {
+  if (event.isComposing) return;
   const login = $("#loginOverlay").classList.contains("active");
   const modal = $("#subscriptionModal").classList.contains("active");
+  const command = !login && !modal && $("#commandOverlay").classList.contains("active");
+  if (command && event.target === $("#commandInput") && ["ArrowDown","ArrowUp","Enter"].includes(event.key)) {
+    event.preventDefault();
+    if (event.key === "Enter") chooseCommandResult(state.commandIndex);
+    else selectCommandResult(state.commandIndex + (event.key === "ArrowDown" ? 1 : -1));
+    return;
+  }
   if (event.key === "Escape") {
-    if (modal && !login) { event.preventDefault(); closeSubscriptionModal(); }
+    if (command) { event.preventDefault(); closeCommandDialog(); }
+    else if (modal && !login) { event.preventDefault(); closeSubscriptionModal(); }
     else if ($(".sidebar").classList.contains("open")) { setSidebarOpen(false); $("#mobileMenu").focus(); }
     return;
   }
-  if (event.key !== "Tab" || (!login && !modal)) return;
-  const dialog = $(login ? "#loginForm" : "#subscriptionForm");
-  const focusable = [...dialog.querySelectorAll('button:not(:disabled),input:not(:disabled),select:not(:disabled),summary,[tabindex="0"]')].filter(item=>item.getClientRects().length);
+  if (event.key !== "Tab" || (!login && !modal && !command)) return;
+  const dialog = $(login ? "#loginForm" : modal ? "#subscriptionForm" : "#commandDialog");
+  const focusable = [...dialog.querySelectorAll('button:not(:disabled),input:not(:disabled),select:not(:disabled),summary,[tabindex="0"]')].filter(item=>item.tabIndex >= 0 && item.getClientRects().length);
   if (!focusable.length) return;
   const first = focusable[0], last = focusable[focusable.length-1];
   if (event.shiftKey && (document.activeElement === first || !dialog.contains(document.activeElement))) { event.preventDefault(); last.focus(); }
@@ -1128,6 +1255,13 @@ function bindEvents() {
   on("#sidebarBackdrop","click",()=>setSidebarOpen(false));
   window.matchMedia("(max-width:760px)").addEventListener("change",()=>setSidebarOpen(false));
   document.addEventListener("keydown",handleDialogKey);
+  document.addEventListener("keydown",handleShortcuts);
+  on("#commandButton","click",openCommandDialog);
+  on("#commandInput","input",renderCommandResults);
+  on("#closeCommandButton","click",()=>closeCommandDialog());
+  on("#commandOverlay","click",event=>{if(event.target===event.currentTarget)closeCommandDialog();});
+  on("#sidebarToggle","click",()=>setSidebarCollapsed(document.documentElement.dataset.sidebar !== "collapsed"));
+  $$("[data-theme-choice]").forEach(button=>button.addEventListener("click",()=>applyTheme(button.dataset.themeChoice)));
   on("#subscriptionModal","click",event=>{if(event.target===event.currentTarget)closeSubscriptionModal();});
   on("#refreshButton","click",async event=>{
     if (state.activeView === "settings" && state.settingsDirty && !confirm("刷新会重新读取设置，丢弃尚未保存的修改。继续吗？")) return;
@@ -1180,8 +1314,7 @@ function bindEvents() {
   on("#downloadLogsButton","click",downloadLogs);
   on("#themeButton","click",()=>{
     const next = document.documentElement.dataset.theme==="light" ? "dark" : "light";
-    document.documentElement.dataset.theme = next;
-    persistPreference(localStorage,"kivo_theme",next);
+    applyTheme(next);
   });
   on("#loginForm","submit",handleLoginSubmit);
   on("#subscriptionForm","submit",handleSubscriptionSubmit);
@@ -1206,6 +1339,7 @@ async function bootstrap() {
   }, 3000);
 }
 
-document.documentElement.dataset.theme=renamedPreference(localStorage,"kivo_theme","proxypilot_theme")||"light";
+document.documentElement.dataset.theme=resolvedTheme(renamedPreference(localStorage,"kivo_theme","proxypilot_theme"));
+initializeAppearance();
 bindEvents();
 api("/api/v1/session/verify",{method:"POST"}).then(()=>{hideLogin();bootstrap()}).catch(()=>showLogin("请输入 Web API 密钥。"));

@@ -13,6 +13,24 @@ import (
 	"github.com/itrunswap/Kivo/internal/core"
 )
 
+// 字体与许可证必须随二进制嵌入，不能误回退为 SPA HTML。
+func TestOfflineFontAssets(t *testing.T) {
+	controller, _ := newTestServer(t)
+	for _, tc := range []struct{ path, contentType, prefix string }{
+		{"/fonts/noto-sans-sc-ui.woff2", "font/woff2", "wOF2"},
+		{"/fonts/OFL.txt", "text/plain", "Copyright 2014-2021 Adobe"},
+	} {
+		response := httptest.NewRecorder()
+		controller.securityHeaders(http.HandlerFunc(controller.handleAsset)).ServeHTTP(response, httptest.NewRequest(http.MethodGet, tc.path, nil))
+		if response.Code != http.StatusOK || !strings.HasPrefix(response.Body.String(), tc.prefix) {
+			t.Fatalf("asset %s did not return embedded content", tc.path)
+		}
+		if !strings.HasPrefix(response.Header().Get("Content-Type"), tc.contentType) {
+			t.Fatalf("asset %s type = %q", tc.path, response.Header().Get("Content-Type"))
+		}
+	}
+}
+
 // stubCore 只为 HTTP 边界测试提供稳定状态，避免测试依赖真实 Mihomo 进程。
 type stubCore struct{}
 

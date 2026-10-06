@@ -6,6 +6,7 @@
   <meta name="color-scheme" content="light dark">
   <meta name="description" content="Kivo · 简洁、清晰的跨平台代理控制台">
   <title>Kivo · 网络控制台</title>
+  <link rel="preload" href="/fonts/noto-sans-sc-ui.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="/app.css">
 </head>
 <body>
@@ -54,15 +55,19 @@
       </nav>
       <div class="sidebar-footer">
         <div class="connection-card"><span id="sidebarDot" class="status-dot"></span><div><strong id="sidebarStatus">正在读取状态</strong><small id="sidebarCore">Mihomo 引擎</small></div></div>
-        <div class="sidebar-bottom"><span>本地网络控制台</span><button id="themeButton" class="icon-button" title="切换明暗主题" aria-label="切换明暗主题"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-theme"/></svg></button></div>
+        <div class="sidebar-bottom"><span>本地网络控制台</span><button id="sidebarToggle" class="icon-button" title="折叠侧栏" aria-label="折叠侧栏" aria-expanded="true" aria-controls="navigation"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-menu"/></svg></button></div>
       </div>
     </aside>
     <button id="sidebarBackdrop" class="sidebar-backdrop" type="button" aria-label="关闭导航" hidden></button>
     <main class="main" id="mainContent">
       <header class="topbar">
+        <div class="topbar-inner">
         <div class="breadcrumb"><button id="mobileMenu" class="icon-button mobile-only" aria-label="打开导航" aria-expanded="false" aria-controls="navigation"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-menu"/></svg></button><span class="breadcrumb-brand">工作空间</span><span class="breadcrumb-divider">/</span><span id="pageTitle">网络概览</span></div>
-        <div class="top-actions"><span id="lastUpdated" class="last-updated" role="status">正在同步</span><button id="refreshButton" class="icon-button" title="刷新当前页面" aria-label="刷新当前页面"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-refresh"/></svg></button><button id="quickStartButton" class="button button-primary button-small">连接代理</button></div>
+        <button id="commandButton" class="global-search" type="button" aria-haspopup="dialog" aria-controls="commandOverlay"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-search"/></svg><span>搜索页面和节点</span><kbd id="commandShortcut">Ctrl K</kbd></button>
+        <div class="top-actions"><span id="lastUpdated" class="last-updated" role="status">正在同步</span><button id="refreshButton" class="icon-button" title="刷新当前页面" aria-label="刷新当前页面"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-refresh"/></svg></button><button id="themeButton" class="icon-button" title="切换明暗主题" aria-label="切换明暗主题"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-theme"/></svg></button><button id="quickStartButton" class="button button-primary button-small">连接代理</button></div>
+        </div>
       </header>
+      <div class="content-scroll" id="contentScroll">
       <div class="workspace">
         <section id="installProgress" class="panel install-progress hidden" aria-label="内核安装进度">
           <div class="panel-heading"><strong id="installStage" role="status">准备安装</strong><span id="installPercent" class="pill">—</span></div>
@@ -151,6 +156,7 @@
         </section>
         <section id="view-settings" class="view" aria-label="偏好设置">
           <div class="page-heading"><div><p class="eyebrow">适合你的运行方式</p><h1>偏好设置</h1><p>配置代理入口、流量接管与控制台访问安全。</p></div></div>
+          <div class="settings-section"><div class="settings-description"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-theme"/></svg><h2>外观</h2><p>跟随系统，或固定明暗主题。外观偏好只保存在此浏览器，不影响代理配置。</p></div><article class="panel appearance-panel"><h3>界面主题</h3><div class="theme-picker" role="group" aria-label="选择界面主题"><button class="button button-secondary" type="button" data-theme-choice="light" aria-pressed="false">浅色</button><button class="button button-secondary" type="button" data-theme-choice="dark" aria-pressed="false">深色</button><button class="button button-secondary" type="button" data-theme-choice="system" aria-pressed="false">跟随系统</button></div><p id="themeSummary" class="footnote" role="status">跟随系统</p></article></div>
           <form id="settingsForm">
             <div class="settings-section"><div class="settings-description"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-settings"/></svg><h2>网络与下载</h2><p>修改后运行中的内核会安全重启。未接入的应用不会受路由模式影响。</p></div><article class="panel form-panel"><div class="form-columns"><label>混合代理端口<input id="settingPort" type="number" min="1" max="65535" required><small>同时提供 HTTP 与 SOCKS5</small></label><label>入口路由模式<select id="settingMode"><option value="rule">规则模式</option><option value="global">全局代理</option><option value="direct">全部直连</option></select><small>决定进入代理后的流量处理方式</small></label></div><label>内核下载代理<input id="settingDownloadProxy" placeholder="留空使用系统代理；或 http://127.0.0.1:7890"><small>仅用于内核下载，不是订阅更新路径</small></label><label>下载重试次数<input id="settingDownloadRetry" type="number" min="1" max="10" value="4"></label></article></div>
             <div class="settings-section"><div class="settings-description"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-route"/></svg><h2>流量接管</h2><p>默认只处理进入代理端口的流量。TUN 涉及系统路由与管理员权限。</p></div><article class="panel form-panel"><label class="toggle-row"><span><strong>允许局域网访问代理</strong><small>让同网络设备访问代理端口，请配置防火墙</small></span><input id="settingLAN" type="checkbox"><i></i></label><label class="toggle-row"><span><strong>启用 TUN 模式</strong><small>接管不支持系统代理的应用，需要管理员权限</small></span><input id="settingTun" type="checkbox"><i></i></label><div class="security-warning">TUN 配置开启不代表路由已成功接管；请结合诊断、日志和外网检测确认。</div></article></div>
@@ -159,6 +165,7 @@
           <div class="settings-section"><div class="settings-description"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-shield"/></svg><h2>控制台安全</h2><p>修改 Token 立即生效。凭据只在当前浏览器会话中保存。</p></div><form id="webSecurityForm" class="panel form-panel security-panel"><div class="panel-heading"><h3>Web 访问权限</h3><span id="webAuthBadge" class="pill">正在读取</span></div><label>新的访问 Token<input id="settingWebToken" type="password" autocomplete="new-password" placeholder="留空保存会关闭鉴权"><small>不回显现有 Token；支持任意长度，建议使用高强度随机值</small></label><div id="webSecurityWarning" class="security-warning">关闭鉴权后，任何能访问此控制台地址的设备都可以管理代理、订阅与节点。</div><p id="webSecurityError" class="form-error" role="alert"></p><div class="inline-actions"><button type="submit" class="button button-secondary">保存访问设置</button></div></form></div>
         </section>
         <footer class="workspace-footer"><span>Kivo</span><span>清晰掌控，自在连接。</span></footer>
+      </div>
       </div>
     </main>
   </div>
@@ -171,6 +178,15 @@
       <div class="modal-body"><div class="form-stack"><label>订阅名称<input id="subName" maxlength="64" placeholder="例如：主线路" required></label><label>订阅地址<input id="subURL" type="url" placeholder="https://example.com/subscribe?token=…" required><small>支持 Clash / Mihomo 兼容订阅</small></label><div class="form-columns"><label>认证 / 加密方式<select id="subAuth"><option value="none">无额外认证 / URL 包含 Token</option><option value="basic">HTTP Basic Auth</option><option value="bearer">Bearer Token</option><option value="token">Token Header</option><option value="age">AGE 加密密钥</option><option value="aes">AES 加密订阅</option></select></label><label>订阅分组<select id="subGroup"></select></label></div><label id="subUsernameRow" class="hidden">用户名<input id="subUsername" autocomplete="username"></label><label id="subSecretRow" class="hidden"><span id="subSecretLabel">密码或 Token</span><input id="subSecret" type="password" autocomplete="new-password"></label><label>订阅更新路径<select id="subUpdateVia"><option value="direct">直连下载（推荐）</option><option value="proxy">通过 PROXY 策略组</option></select></label></div><details class="modal-advanced"><summary>高级选项</summary><div class="form-stack"><div class="form-columns"><label>更新周期（秒）<input id="subInterval" type="number" value="3600" min="60"></label><label>健康检查（秒）<input id="subHealth" type="number" value="300" min="30"></label></div><label>节点名称前缀（可选）<input id="subPrefix" placeholder="例如：[主线路]"></label></div></details><p id="subscriptionError" class="form-error" role="alert"></p></div>
       <div class="modal-actions"><button type="button" class="button button-secondary" data-close-modal>取消</button><button type="submit" class="button button-primary">添加订阅</button></div>
     </form>
+  </div>
+  <!-- 快捷搜索只导航与筛选，不会触发节点切换或其他代理写操作。 -->
+  <div id="commandOverlay" class="overlay modal-overlay" aria-hidden="true">
+    <section id="commandDialog" class="modal-card command-card" role="dialog" aria-modal="true" aria-labelledby="commandTitle">
+      <h2 id="commandTitle" class="sr-only">搜索页面和已加载节点</h2>
+      <div class="command-input-row"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-search"/></svg><input id="commandInput" type="text" role="combobox" aria-autocomplete="list" aria-expanded="true" aria-controls="commandList" autocomplete="off" placeholder="搜索页面、节点名称或订阅…"><button id="closeCommandButton" class="icon-button" type="button" aria-label="关闭搜索"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-close"/></svg></button></div>
+      <div id="commandList" class="command-list" role="listbox" aria-label="搜索结果"></div>
+      <div class="command-footer"><span id="commandCount" role="status">搜索页面和已加载节点</span><span><kbd>↑↓</kbd> 选择 <kbd>Enter</kbd> 打开 <kbd>Esc</kbd> 关闭</span></div>
+    </section>
   </div>
   <div id="toastRegion" class="toast-region" aria-live="polite" aria-atomic="false"></div>
   <script src="/app.js" defer></script>
