@@ -9,7 +9,7 @@ import (
 
 func TestMenuUsesFixedActionsAndBusyGate(t *testing.T) {
 	for _, busy := range []bool{false, true} {
-		items := Menu(View{Title: "仅内核运行", Node: "A&B\n香港", Connect: true, Disconnect: true, Check: true, Busy: busy})
+		items := Menu(View{Title: "已启用", Node: "A&B\n香港", Connect: true, Disconnect: true, Check: true, TUNCanChange: true, Busy: busy})
 		seen := map[Action]bool{}
 		for _, item := range items {
 			if item.Action != 0 {
@@ -25,8 +25,38 @@ func TestMenuUsesFixedActionsAndBusyGate(t *testing.T) {
 				t.Fatal("unsafe menu label", item)
 			}
 		}
-		if len(seen) != 7 {
+		if len(seen) != 7 || seen[Connect] || !seen[Disconnect] || !seen[EnableTUN] || seen[DisableTUN] {
 			t.Fatal("missing command", seen)
+		}
+	}
+	items := Menu(View{Title: "未启用", Connect: true})
+	if items[4].Action != Connect || items[4].Label != "开启代理" || !items[4].Enabled {
+		t.Fatal("off state did not show connect action", items[4])
+	}
+}
+
+func TestMenuShowsExactlyOneTUNAction(t *testing.T) {
+	for _, test := range []struct {
+		enabled bool
+		action  Action
+		label   string
+	}{
+		{false, EnableTUN, "开启 TUN 模式"},
+		{true, DisableTUN, "关闭 TUN 模式"},
+	} {
+		items := Menu(View{TUNEnabled: test.enabled, TUNCanChange: true})
+		found := 0
+		for _, item := range items {
+			if item.Action != EnableTUN && item.Action != DisableTUN {
+				continue
+			}
+			found++
+			if item.Action != test.action || item.Label != test.label || !item.Enabled {
+				t.Fatal("TUN menu state", item)
+			}
+		}
+		if found != 1 {
+			t.Fatal("TUN menu action count", found)
 		}
 	}
 }

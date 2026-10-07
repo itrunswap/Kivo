@@ -47,7 +47,9 @@ func packageRelease(input, output, source string) error {
 	// 提前读取全部输入，缺失文件时不生成貌似完整的发布目录。
 	documents := []packageEntry{}
 	for _, item := range []struct{ source, name string }{
+		{"LICENSE", "LICENSE"},
 		{"README.md", "README.md"},
+		{"docs/INSTALL.md", "docs/INSTALL.md"},
 		{"docs/USER_MANUAL.md", "docs/USER_MANUAL.md"},
 		{"docs/COMMANDS.md", "docs/COMMANDS.md"},
 		{"docs/API.md", "docs/API.md"},

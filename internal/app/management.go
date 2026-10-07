@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -109,16 +110,22 @@ func resolveCoreReference(inventory core.Inventory, reference string) (string, e
 
 // SubscriptionPatch 只修改非 nil 字段；Secret 为 nil 时保留旧凭据。
 type SubscriptionPatch struct {
-	Reference        string  `json:"reference"`
-	Name             *string `json:"name,omitempty"`
-	URL              *string `json:"url,omitempty"`
-	AuthType         *string `json:"authType,omitempty"`
-	Username         *string `json:"username,omitempty"`
-	Secret           *string `json:"secret,omitempty"`
-	UpdateVia        *string `json:"updateVia,omitempty"`
-	Group            *string `json:"group,omitempty"`
-	AdditionalPrefix *string `json:"additionalPrefix,omitempty"`
-	Enabled          *bool   `json:"enabled,omitempty"`
+	Revision         string                       `json:"revision,omitempty"`
+	DownloadAuth     *SubscriptionCredentialPatch `json:"downloadAuth,omitempty"`
+	Decryption       *SubscriptionCredentialPatch `json:"decryption,omitempty"`
+	Options          *config.SubscriptionOptions  `json:"options,omitempty"`
+	UpdateInterval   *int                         `json:"updateInterval,omitempty"`
+	HealthInterval   *int                         `json:"healthInterval,omitempty"`
+	Reference        string                       `json:"reference"`
+	Name             *string                      `json:"name,omitempty"`
+	URL              *string                      `json:"url,omitempty"`
+	AuthType         *string                      `json:"authType,omitempty"`
+	Username         *string                      `json:"username,omitempty"`
+	Secret           *string                      `json:"secret,omitempty"`
+	UpdateVia        *string                      `json:"updateVia,omitempty"`
+	Group            *string                      `json:"group,omitempty"`
+	AdditionalPrefix *string                      `json:"additionalPrefix,omitempty"`
+	Enabled          *bool                        `json:"enabled,omitempty"`
 }
 
 func (s *Service) PatchSubscription(ctx context.Context, patch SubscriptionPatch) error {
@@ -135,6 +142,27 @@ func (s *Service) PatchSubscription(ctx context.Context, patch SubscriptionPatch
 			return err
 		}
 		sub := &cfg.Subscriptions[index]
+		if patch.Revision != "" && patch.Revision != sub.Revision() {
+			return errors.New("订阅已被其他窗口修改，请返回后重新打开编辑页；当前输入尚未保存")
+		}
+		if err := patchSubscriptionCredentials(sub, patch); err != nil {
+			return err
+		}
+		if patch.Options != nil {
+			sub.Options = *patch.Options
+		}
+		if patch.UpdateInterval != nil {
+			if *patch.UpdateInterval < 60 || *patch.UpdateInterval > 604800 {
+				return errors.New("更新周期须在 60–604800 秒之间")
+			}
+			sub.UpdateInterval = *patch.UpdateInterval
+		}
+		if patch.HealthInterval != nil {
+			if *patch.HealthInterval < 30 || *patch.HealthInterval > 604800 {
+				return errors.New("健康检查周期须在 30–604800 秒之间")
+			}
+			sub.HealthInterval = *patch.HealthInterval
+		}
 		if patch.Name != nil {
 			sub.Name = strings.TrimSpace(*patch.Name)
 		}
@@ -146,22 +174,8 @@ func (s *Service) PatchSubscription(ctx context.Context, patch SubscriptionPatch
 			}
 			sub.URL = candidate
 		}
-		if patch.AuthType != nil {
-			sub.Auth.Type = strings.ToLower(strings.TrimSpace(*patch.AuthType))
-		}
-		if patch.Username != nil {
-			sub.Auth.Username = strings.TrimSpace(*patch.Username)
-		}
-		if patch.Secret != nil {
-			sub.Auth.Secret = strings.TrimSpace(*patch.Secret)
-		}
 		if patch.UpdateVia != nil {
 			sub.UpdateVia = strings.ToLower(strings.TrimSpace(*patch.UpdateVia))
-		}
-		if sub.Auth.Type == "none" {
-			// 关闭认证时立即清除不再使用的凭据，避免敏感信息继续留在配置文件中。
-			sub.Auth.Username = ""
-			sub.Auth.Secret = ""
 		}
 		if patch.Group != nil {
 			group, err := canonicalSubscriptionGroup(cfg.SubscriptionGroups, *patch.Group)
@@ -180,7 +194,7 @@ func (s *Service) PatchSubscription(ctx context.Context, patch SubscriptionPatch
 	}); err != nil {
 		return err
 	}
-	return s.reloadIfRunning(ctx)
+	return s.reloadSavedSubscription(ctx)
 }
 
 func (s *Service) RemoveSubscriptionReference(ctx context.Context, reference string) error {
@@ -297,7 +311,8 @@ func (s *Service) prepareSubscriptionAction(ctx context.Context, targets []confi
 					previousRoutes[cfg.Subscriptions[index].Name] = cfg.Subscriptions[index].UpdateVia
 					cfg.Subscriptions[index].UpdateVia = via
 					// AES 从适配器实时读取路径，无需重载 Mihomo；普通 provider 才需应用配置。
-					if !strings.EqualFold(cfg.Subscriptions[index].Auth.Type, "aes") {
+					_, decrypt := cfg.Subscriptions[index].Credentials()
+					if decrypt.Type != "aes" {
 						routeChanged = true
 					}
 				}
@@ -487,6 +502,45 @@ func (s *Service) CreateSubscriptionGroup(name string) error {
 	})
 }
 
+// RenameSubscriptionGroup 原子更新分组名称及其订阅引用；默认分组是稳定的回退目标。
+func (s *Service) RenameSubscriptionGroup(ctx context.Context, oldName, newName string) error {
+	if !s.subscriptionAction.TryLock() {
+		return errors.New("内核或订阅操作正在执行")
+	}
+	defer s.subscriptionAction.Unlock()
+	newName = strings.TrimSpace(newName)
+	if newName == "" {
+		return errors.New("分组名称不能为空")
+	}
+	if strings.EqualFold(oldName, "default") {
+		return errors.New("默认分组不能重命名")
+	}
+	if err := s.store.Update(func(cfg *config.Config) error {
+		index := -1
+		for i, group := range cfg.SubscriptionGroups {
+			if strings.EqualFold(group.Name, newName) && !strings.EqualFold(group.Name, oldName) {
+				return fmt.Errorf("订阅分组 %s 已存在", newName)
+			}
+			if strings.EqualFold(group.Name, oldName) {
+				index = i
+			}
+		}
+		if index < 0 {
+			return fmt.Errorf("订阅分组 %s 不存在", oldName)
+		}
+		cfg.SubscriptionGroups[index].Name = newName
+		for i := range cfg.Subscriptions {
+			if strings.EqualFold(cfg.Subscriptions[i].Group, oldName) {
+				cfg.Subscriptions[i].Group = newName
+			}
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	return s.reloadIfRunning(ctx)
+}
+
 func (s *Service) SetSubscriptionGroup(ctx context.Context, name string, enabled, exclusive bool) error {
 	if !s.subscriptionAction.TryLock() {
 		return errors.New("内核或订阅操作正在执行")
@@ -516,6 +570,9 @@ func (s *Service) SetSubscriptionGroup(ctx context.Context, name string, enabled
 }
 
 func (s *Service) RemoveSubscriptionGroup(ctx context.Context, name string) error {
+	if strings.EqualFold(name, "default") {
+		return errors.New("默认分组不能删除")
+	}
 	if !s.subscriptionAction.TryLock() {
 		return errors.New("内核或订阅操作正在执行")
 	}
@@ -549,12 +606,53 @@ func canonicalSubscriptionGroup(groups []config.SubscriptionGroup, value string)
 
 func (s *Service) Routing() config.RoutingConfig { return s.store.Snapshot().Routing }
 
+// RestoreRouteDefaults 只补齐缺失内置项，不覆盖用户现有规则及自定义方案。
+func (s *Service) RestoreRouteDefaults(ctx context.Context) error {
+	if !s.subscriptionAction.TryLock() {
+		return errors.New("内核或订阅操作正在执行")
+	}
+	defer s.subscriptionAction.Unlock()
+	defaults := config.DefaultRouting()
+	current := s.store.Snapshot().Routing
+	missing := false
+	for _, group := range defaults.RuleGroups {
+		if !slices.ContainsFunc(current.RuleGroups, func(item config.RuleGroup) bool { return strings.EqualFold(item.Name, group.Name) }) {
+			missing = true
+			break
+		}
+	}
+	if !missing {
+		for _, profile := range defaults.Profiles {
+			if !slices.ContainsFunc(current.Profiles, func(item config.RouteProfile) bool { return strings.EqualFold(item.Name, profile.Name) }) {
+				missing = true
+				break
+			}
+		}
+	}
+	if !missing {
+		return nil
+	}
+	return s.applyRoutingUpdate(ctx, func(cfg *config.Config) error {
+		for _, group := range defaults.RuleGroups {
+			if !slices.ContainsFunc(cfg.Routing.RuleGroups, func(item config.RuleGroup) bool { return strings.EqualFold(item.Name, group.Name) }) {
+				cfg.Routing.RuleGroups = append(cfg.Routing.RuleGroups, group)
+			}
+		}
+		for _, profile := range defaults.Profiles {
+			if !slices.ContainsFunc(cfg.Routing.Profiles, func(item config.RouteProfile) bool { return strings.EqualFold(item.Name, profile.Name) }) {
+				cfg.Routing.Profiles = append(cfg.Routing.Profiles, profile)
+			}
+		}
+		return nil
+	})
+}
+
 func (s *Service) UseRouteProfile(ctx context.Context, name string) error {
 	if !s.subscriptionAction.TryLock() {
 		return errors.New("内核或订阅操作正在执行")
 	}
 	defer s.subscriptionAction.Unlock()
-	if err := s.store.Update(func(cfg *config.Config) error {
+	return s.applyRoutingUpdate(ctx, func(cfg *config.Config) error {
 		found := false
 		for _, profile := range cfg.Routing.Profiles {
 			if strings.EqualFold(profile.Name, name) {
@@ -575,10 +673,7 @@ func (s *Service) UseRouteProfile(ctx context.Context, name string) error {
 			cfg.Mihomo.Mode = "rule"
 		}
 		return nil
-	}); err != nil {
-		return err
-	}
-	return s.reloadIfRunning(ctx)
+	})
 }
 
 func (s *Service) CreateRouteProfile(name, defaultAction string, groups []string) error {
@@ -613,7 +708,7 @@ func (s *Service) SetRouteProfileGroup(ctx context.Context, profileName, groupNa
 		return errors.New("内核或订阅操作正在执行")
 	}
 	defer s.subscriptionAction.Unlock()
-	if err := s.store.Update(func(cfg *config.Config) error {
+	return s.applyRoutingUpdate(ctx, func(cfg *config.Config) error {
 		groupExists := false
 		for _, group := range cfg.Routing.RuleGroups {
 			if strings.EqualFold(group.Name, groupName) {
@@ -638,13 +733,13 @@ func (s *Service) SetRouteProfileGroup(ctx context.Context, profileName, groupNa
 			return nil
 		}
 		return fmt.Errorf("路由配置 %s 不存在", profileName)
-	}); err != nil {
-		return err
-	}
-	return s.reloadIfRunning(ctx)
+	})
 }
 
 func (s *Service) DeleteRouteProfile(name string) error {
+	if isBuiltinRouteProfile(name) {
+		return errors.New("内置路由方案不能删除；可创建自定义方案")
+	}
 	return s.store.Update(func(cfg *config.Config) error {
 		if strings.EqualFold(cfg.Routing.ActiveProfile, name) {
 			return errors.New("不能删除当前活动路由配置，请先切换")
@@ -656,6 +751,14 @@ func (s *Service) DeleteRouteProfile(name string) error {
 		}
 		return nil
 	})
+}
+
+func isBuiltinRouteProfile(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "global", "direct", "rule", "bypass-cn", "proxy-only", "bypass-list":
+		return true
+	}
+	return false
 }
 
 func (s *Service) CreateRuleGroup(name string) error {
@@ -672,6 +775,10 @@ func (s *Service) CreateRuleGroup(name string) error {
 }
 
 func (s *Service) DeleteRuleGroup(name string) error {
+	switch strings.TrimSpace(name) {
+	case "中国大陆直连", "指定地址代理", "指定地址直连":
+		return errors.New("内置规则组不能删除；可清空或创建自定义规则组")
+	}
 	return s.store.Update(func(cfg *config.Config) error {
 		for _, profile := range cfg.Routing.Profiles {
 			if slices.ContainsFunc(profile.Groups, func(value string) bool { return strings.EqualFold(value, name) }) {
@@ -692,7 +799,7 @@ func (s *Service) AddRouteRule(ctx context.Context, groupName string, rule confi
 		return errors.New("内核或订阅操作正在执行")
 	}
 	defer s.subscriptionAction.Unlock()
-	if err := s.store.Update(func(cfg *config.Config) error {
+	return s.applyRoutingUpdate(ctx, func(cfg *config.Config) error {
 		for index := range cfg.Routing.RuleGroups {
 			if strings.EqualFold(cfg.Routing.RuleGroups[index].Name, groupName) {
 				cfg.Routing.RuleGroups[index].Rules = append(cfg.Routing.RuleGroups[index].Rules, rule)
@@ -700,18 +807,20 @@ func (s *Service) AddRouteRule(ctx context.Context, groupName string, rule confi
 			}
 		}
 		return fmt.Errorf("规则组 %s 不存在", groupName)
-	}); err != nil {
-		return err
-	}
-	return s.reloadIfRunning(ctx)
+	})
 }
 
 func (s *Service) RemoveRouteRule(ctx context.Context, groupName string, index int) error {
+	return s.RemoveRouteRuleChecked(ctx, groupName, index, nil)
+}
+
+// RemoveRouteRuleChecked 在有预期规则时拒绝过期的序号，避免多端并发误删。
+func (s *Service) RemoveRouteRuleChecked(ctx context.Context, groupName string, index int, expected *config.RouteRule) error {
 	if !s.subscriptionAction.TryLock() {
 		return errors.New("内核或订阅操作正在执行")
 	}
 	defer s.subscriptionAction.Unlock()
-	if err := s.store.Update(func(cfg *config.Config) error {
+	return s.applyRoutingUpdate(ctx, func(cfg *config.Config) error {
 		for groupIndex := range cfg.Routing.RuleGroups {
 			group := &cfg.Routing.RuleGroups[groupIndex]
 			if !strings.EqualFold(group.Name, groupName) {
@@ -723,12 +832,113 @@ func (s *Service) RemoveRouteRule(ctx context.Context, groupName string, index i
 			if index < 1 || index > len(group.Rules) {
 				return fmt.Errorf("规则序号必须在 1-%d 之间", len(group.Rules))
 			}
+			if expected != nil && group.Rules[index-1] != *expected {
+				return errors.New("规则列表已变化，请刷新后再删除")
+			}
 			group.Rules = slices.Delete(group.Rules, index-1, index)
 			return nil
 		}
 		return fmt.Errorf("规则组 %s 不存在", groupName)
+	})
+}
+
+// UpdateRouteRule 替换指定规则；预期旧值使桌面与 Web 的并发编辑可检测。
+func (s *Service) UpdateRouteRule(ctx context.Context, groupName string, index int, expected, replacement config.RouteRule) error {
+	if !s.subscriptionAction.TryLock() {
+		return errors.New("内核或订阅操作正在执行")
+	}
+	defer s.subscriptionAction.Unlock()
+	return s.applyRoutingUpdate(ctx, func(cfg *config.Config) error {
+		for i := range cfg.Routing.RuleGroups {
+			group := &cfg.Routing.RuleGroups[i]
+			if !strings.EqualFold(group.Name, groupName) {
+				continue
+			}
+			if index < 1 || index > len(group.Rules) {
+				return errors.New("规则序号已变化，请刷新后重试")
+			}
+			if group.Rules[index-1] != expected {
+				return errors.New("规则已被其他窗口修改，请刷新后重试")
+			}
+			group.Rules[index-1] = replacement
+			return nil
+		}
+		return fmt.Errorf("规则组 %s 不存在", groupName)
+	})
+}
+
+// MoveRouteRule 只移动组内规则，维持 Mihomo 的从上到下匹配语义。
+func (s *Service) MoveRouteRule(ctx context.Context, groupName string, from, to int, expected config.RouteRule) error {
+	if !s.subscriptionAction.TryLock() {
+		return errors.New("内核或订阅操作正在执行")
+	}
+	defer s.subscriptionAction.Unlock()
+	return s.applyRoutingUpdate(ctx, func(cfg *config.Config) error {
+		for i := range cfg.Routing.RuleGroups {
+			group := &cfg.Routing.RuleGroups[i]
+			if !strings.EqualFold(group.Name, groupName) {
+				continue
+			}
+			if from < 1 || from > len(group.Rules) || to < 1 || to > len(group.Rules) {
+				return errors.New("规则序号已变化，请刷新后重试")
+			}
+			if group.Rules[from-1] != expected {
+				return errors.New("规则已被其他窗口修改，请刷新后重试")
+			}
+			rule := group.Rules[from-1]
+			group.Rules = slices.Delete(group.Rules, from-1, from)
+			group.Rules = slices.Insert(group.Rules, to-1, rule)
+			return nil
+		}
+		return fmt.Errorf("规则组 %s 不存在", groupName)
+	})
+}
+
+// applyRoutingUpdate 在内核拒绝新规则时恢复旧持久配置，避免报错后留下无法启动的规则。
+// 调用方已持有 subscriptionAction 锁，确保路由操作不会相互穿插。
+func (s *Service) applyRoutingUpdate(ctx context.Context, change func(*config.Config) error) error {
+	before := s.store.Snapshot()
+	candidate, err := s.store.Preview(change)
+	if err != nil {
+		return err
+	}
+	if validator, ok := s.core.(interface {
+		ValidateConfig(context.Context, config.Config) error
+	}); ok {
+		if err := validator.ValidateConfig(ctx, candidate); err != nil {
+			return err
+		}
+	}
+	if err := s.store.Update(func(cfg *config.Config) error {
+		if !reflect.DeepEqual(*cfg, before) {
+			return errors.New("配置已被其他窗口修改，请刷新后重试")
+		}
+		return change(cfg)
 	}); err != nil {
 		return err
 	}
-	return s.reloadIfRunning(ctx)
+	if err := s.reloadIfRunning(ctx); err != nil {
+		applied := s.store.Snapshot()
+		rollbackErr := s.store.Update(func(cfg *config.Config) error {
+			if !reflect.DeepEqual(cfg.Routing, applied.Routing) || cfg.Mihomo.Mode != applied.Mihomo.Mode {
+				return errors.New("其他客户端已修改路由，不能安全回滚")
+			}
+			cfg.Routing = before.Routing
+			cfg.Mihomo.Mode = before.Mihomo.Mode
+			return nil
+		})
+		if rollbackErr != nil {
+			return errors.Join(fmt.Errorf("新路由未能应用；配置可能已保存: %w", err), rollbackErr)
+		}
+		if s.core.Status(ctx).State != core.StateRunning {
+			recoveryCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			recoveryErr := s.core.Restart(recoveryCtx)
+			cancel()
+			if recoveryErr != nil {
+				return errors.Join(fmt.Errorf("新路由未能应用，已恢复上一次配置，但内核未能恢复运行: %w", err), recoveryErr)
+			}
+		}
+		return fmt.Errorf("新路由未能应用，已恢复上一次配置: %w", err)
+	}
+	return nil
 }

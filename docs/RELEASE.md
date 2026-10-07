@@ -1,7 +1,6 @@
 # Kivo 构建与发布指南
 
-本指南面向维护者。普通用户直接下载 [Release](https://github.com/itrunswap/Kivo/releases)，
-不需要开发工具。首次发布完成前，下载页可能为空。
+本指南面向维护者。普通用户请阅读[下载安装指南](INSTALL.md)。正式版本标签触发同一工作流：Linux 构建六平台 CLI/Web、Windows 原生构建桌面和 NSIS 安装器、macOS 原生构建 Universal 桌面、CLI、ZIP 与未公证 PKG。只有全部构建和校验通过，Release 才会公开。首次发布完成前下载页可能为空。
 
 ## 1. 发行文件
 
@@ -14,9 +13,11 @@
 | Linux AMD64 | kivo-linux-amd64 | kivo-linux-amd64.tar.gz | kivo |
 | Linux ARM64 | kivo-linux-arm64 | kivo-linux-arm64.tar.gz | kivo |
 
-每包附带 README、`docs/USER_MANUAL.md` 和第三方组件声明。macOS / Linux 程序在
+每个 CLI 包附带 `LICENSE`、README、`docs/USER_MANUAL.md` 和第三方组件声明。macOS / Linux 程序在
 tar 中设置 `0755` 可执行权限。包名不带版本以便“最新版”链接使用；具体版本由
 Release 标签和程序 `version` 命令确定。
+
+另有 Windows AMD64/ARM64 的 `Kivo-Setup-windows-*.exe` 和 `kivo-desktop-windows-*.zip`，以及 macOS 的 `Kivo-Installer-darwin-universal.pkg` 和 `kivo-desktop-darwin-universal.zip`。这些桌面包附带 CLI，CLI 内嵌 Web。共 12 个资产，另有统一 `SHA256SUMS`；GitHub 自动附带标签对应的源码压缩包。
 
 发行包不包含 Mihomo、开发工具、真实订阅、Token、密码、运行缓存或系统代理备份。
 打包器只收录固定白名单，并拒绝覆盖已有文件；重复打包请使用新的输出目录。
@@ -43,15 +44,15 @@ GitHub Actions 的 Ubuntu 环境强制执行竞态检测。
 ```powershell
 $releaseCommit = git rev-parse HEAD
 $releaseDate = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
-./scripts/build.ps1 -Version v0.2.7 -Commit $releaseCommit -BuildDate $releaseDate -OutputDirectory dist/v0.2.7
-go run ./scripts/package.go -input dist/v0.2.7 -output dist/releases/v0.2.7
+./scripts/build.ps1 -Version v0.4.0 -Commit $releaseCommit -BuildDate $releaseDate -OutputDirectory dist/v0.4.0
+go run ./scripts/package.go -input dist/v0.4.0 -output dist/releases/v0.4.0
 ```
 
 ### macOS / Linux
 
 ```bash
-VERSION=v0.2.7 COMMIT="$(git rev-parse HEAD)" BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" sh ./scripts/build.sh
-go run ./scripts/package.go -input dist -output dist/releases/v0.2.7
+VERSION=v0.4.0 COMMIT="$(git rev-parse HEAD)" BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" sh ./scripts/build.sh
+go run ./scripts/package.go -input dist -output dist/releases/v0.4.0
 ```
 
 脚本执行格式、测试、静态检查，以 `CGO_ENABLED=0` 编译六个平台。Go 标准库打包器
@@ -106,13 +107,13 @@ Go / 前端测试、交叉构建和打包。
 
 ```bash
 git push -u origin main
-git tag -a v0.2.7 -m "发布 Kivo v0.2.7"
-git push origin v0.2.7
+git tag -a v0.4.0 -m "发布 Kivo v0.4.0"
+git push origin v0.4.0
 ```
 
-后续改用 `v0.2.8` 等，不要覆盖已有标签。标签流程只接受 `v数字.数字.数字`，
+后续使用尚未占用的版本号，不要覆盖已有标签。上方 `v0.4.0` 只是示例，发布前需先检查远程已有标签。标签流程只接受 `v数字.数字.数字`，
 从对应提交构建，注入版本、提交哈希和 UTC 时间。全部检查通过后创建草稿、上传
-六个包和清单，确认七个资产齐全后公开为最新版。
+十二个包和清单，确认十三个资产齐全后公开为最新版。Windows/macOS 安装器必须通过对应操作系统的原生 CI 验证；在 Windows 本机不能宣称 Mac 包已构建成功。
 
 只使用 GitHub 自带令牌，无需在仓库中保存个人 Token。失败后可重跑未公开草稿的
 上传，但不能覆盖已发布版本。本地文件已存在时换输出目录，不要删除整个 dist。
@@ -122,6 +123,6 @@ git push origin v0.2.7
 
 ## 6. 许可与边界
 
-Kivo 自身许可证尚未指定，请由所有者补充 LICENSE。源码公开不等于已有无限制授权。
+Kivo 自身采用 MIT，根目录 `LICENSE` 必须随源码与程序包分发。
 Mihomo 使用 GPL-3.0，发行包不捆绑其二进制，详见[第三方声明](../THIRD_PARTY_NOTICES.md)。
 Windows 未做 Authenticode 签名，macOS 未签名或公证；多平台实机与长期联网稳定性需另行验收。

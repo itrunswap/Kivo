@@ -252,7 +252,7 @@ function setSidebarOpen(open) {
   if (open) $(".nav-item.active").focus();
 }
 function loadActiveView(name = state.activeView) {
-  const loaders = {nodes:loadNodes, subscriptions:loadSubscriptions, cores:loadCores, routing:loadRouting, logs:loadLogs, settings:loadSettings};
+  const loaders = {nodes:loadNodes, subscriptions:loadSubscriptions, cores:loadCores, routing:loadRouting, diagnostics:runDoctor, logs:loadLogs, settings:loadSettings};
   return loaders[name]?.();
 }
 function switchView(name, {reload = false, load = true} = {}) {
@@ -726,6 +726,7 @@ async function loadSubscriptions() {
     const [items,groups] = await Promise.all([api("/api/v1/subscriptions"),api("/api/v1/subscription-groups")]);
     state.subscriptionGroups = groups || [];
     renderSubscriptionGroups();
+    state.subscriptions = items || [];
     renderSubscriptions(items || []);
   } catch (error) {
     grid.replaceChildren();
@@ -749,6 +750,16 @@ function renderSubscriptionGroups() {
     });
     if (state.subscriptionGroups.some(group => group.name === previous)) select.value = previous;
   });
+  updateSubscriptionGroupControls();
+}
+function updateSubscriptionGroupControls() {
+  const group = state.subscriptionGroups.find(item => item.name === $("#subscriptionGroupSelect").value);
+  $("#toggleSubscriptionGroup").textContent = group?.enabled ? "禁用此组" : "启用此组";
+  $("#toggleSubscriptionGroup").disabled = !group;
+  $("#saveSubscriptionGroupName").disabled = !group || group.name === "default";
+  $("#deleteSubscriptionGroup").disabled = !group || group.name === "default";
+  $("#renameSubscriptionGroup").disabled = !group || group.name === "default";
+  $("#renameSubscriptionGroup").value = group?.name === "default" ? "" : group?.name || "";
 }
 function renderSubscriptions(items) {
   const grid = $("#subscriptionGrid");
@@ -778,7 +789,10 @@ function renderSubscriptions(items) {
     const meta = document.createElement("div");
     meta.className = "subscription-meta";
     const auth = (sub.authType || "none").toLowerCase();
-    const authLabel = ({none:"无额外认证",basic:"Basic 认证",bearer:"Bearer 认证",token:"Token 认证",aes:"AES 解密",age:"AGE 解密"})[auth] || `${auth.toUpperCase()} 认证`;
+    const authNames = {none:"无需额外认证",basic:"Basic 认证",bearer:"Bearer 认证",token:"Token 请求头",aes:"AES 解密",age:"age 私钥解密"};
+    const authLabel = sub.downloadAuthType
+      ? [authNames[sub.downloadAuthType] || sub.downloadAuthType, sub.decryptionType && sub.decryptionType !== "none" ? authNames[sub.decryptionType] : ""].filter(Boolean).join(" · ")
+      : authNames[auth] || `${auth.toUpperCase()} 认证`;
     const updateLabel = (sub.updateVia || "direct").toLowerCase() === "proxy" ? "PROXY 出站" : "直连下载";
     [sub.group, authLabel, updateLabel, `${sub.updateInterval}s 更新`, `${sub.healthInterval}s 检查`].forEach(text => {
       const tag = document.createElement("span");
@@ -807,6 +821,7 @@ function renderSubscriptions(items) {
       actions.append(button);
     };
     addAction(sub.enabled ? "禁用" : "启用", button => toggleSubscription(sub, button));
+    addAction("编辑", () => openSubscriptionModal(sub));
     addAction("更新", button => updateSubscription(sub.name, button, route.value));
     addAction("检查", button => testSubscription(sub.name, button, route.value));
     addAction("删除", () => removeSubscription(sub.name));
@@ -945,15 +960,38 @@ function renderRouting() {
     title.append(heading, badge);
     const description = document.createElement("p"); description.className = "subscription-url";
     const names = profile.groups || [];
-    description.textContent = names.length ? names.join(" → ") : "无规则组";
+    description.textContent = names.length ? "已关联规则组（按顺序匹配）" : "尚未关联规则组；未命中流量按默认动作处理";
     const button = document.createElement("button"); button.className = "button button-secondary";
     button.textContent = "应用配置"; button.disabled = active;
     button.addEventListener("click", () => useRouteProfile(profile.name, button));
     const note = textElement("p",profileDescription(profile.name), "profile-note");
-    card.append(title, description, note, button); profiles.append(card);
+    const chips = document.createElement("div"); chips.className = "route-chip-list";
+    names.forEach(name => {
+      const chip = document.createElement("button"); chip.className = "route-chip"; chip.type = "button";
+      chip.textContent = `${name} ×`; chip.title = `从 ${profile.name} 解除 ${name}`;
+      chip.addEventListener("click", () => { if (confirm(`从“${profile.name}”解除“${name}”？规则组不会被删除。`)) routeMutation("/api/v1/routing/profiles", "PATCH", {profile:profile.name,group:name,attached:false}, "规则组已解除关联"); });
+      chips.append(chip);
+    });
+    const actions = document.createElement("div"); actions.className = "subscription-actions route-card-actions";
+    actions.append(button);
+    const available = (routing.ruleGroups || []).filter(group => !names.includes(group.name));
+    if (available.length) {
+      const select = document.createElement("select"); select.className = "select"; select.setAttribute("aria-label", `给 ${profile.name} 关联规则组`);
+      available.forEach(group => {const option=document.createElement("option");option.value=group.name;option.textContent=group.name;select.append(option);});
+      const attach = document.createElement("button"); attach.className = "button button-secondary"; attach.type = "button"; attach.textContent = "关联组";
+      attach.addEventListener("click", () => routeMutation("/api/v1/routing/profiles", "PATCH", {profile:profile.name,group:select.value,attached:true}, "规则组已关联"));
+      actions.append(select, attach);
+    }
+    if (!isBuiltinRouteProfile(profile.name) && !active) {
+      const remove = document.createElement("button"); remove.className = "button button-secondary"; remove.type = "button"; remove.textContent = "删除方案";
+      remove.addEventListener("click", () => { if (confirm(`删除自定义方案“${profile.name}”？`)) routeMutation(`/api/v1/routing/profiles?name=${encodeURIComponent(profile.name)}`, "DELETE", null, "方案已删除"); });
+      actions.append(remove);
+    }
+    card.append(title, description, chips, note, actions); profiles.append(card);
   });
   const select = $("#routeRuleGroup"); select.replaceChildren();
   const groups = $("#routeGroups"); groups.replaceChildren();
+  $("#addRouteRule").disabled = !(routing.ruleGroups || []).length;
   (routing.ruleGroups || []).forEach(group => {
     const rules = group.rules || [];
     const option = document.createElement("option"); option.value = group.name; option.textContent = group.name;
@@ -967,17 +1005,77 @@ function renderRouting() {
       [`${index + 1}`, rule.type, rule.value, rule.action.toUpperCase()].forEach(text => {
         const cell = document.createElement("span"); cell.textContent = text; row.append(cell);
       });
-      const remove = document.createElement("button"); remove.className = "text-button"; remove.textContent = "删除";
-      remove.addEventListener("click", () => removeRouteRule(group.name, index + 1));
-      row.append(remove); list.append(row);
+      const actions = document.createElement("div"); actions.className = "rule-item-actions";
+      const action = (label, run, disabled = false) => {
+        const button = document.createElement("button"); button.type = "button"; button.className = "text-button";
+        button.textContent = label; button.disabled = disabled; button.addEventListener("click", run); actions.append(button);
+      };
+      action("编辑", () => openRouteRuleEditor(row, group.name, index + 1, rule));
+      action("↑", () => routeMutation("/api/v1/routing/rules/move", "POST", {group:group.name,from:index+1,to:index,expected:rule}, "规则已上移"), index === 0);
+      action("↓", () => routeMutation("/api/v1/routing/rules/move", "POST", {group:group.name,from:index+1,to:index+2,expected:rule}, "规则已下移"), index === rules.length - 1);
+      action("删除", () => removeRouteRule(group.name, index + 1, rule));
+      row.append(actions); list.append(row);
     });
     if (!rules.length) { const hint = document.createElement("p"); hint.textContent = "尚无规则，可使用上方表单添加。"; list.append(hint); }
-    card.append(list); groups.append(card);
+    card.append(list);
+    if (!["中国大陆直连", "指定地址代理", "指定地址直连"].includes(group.name)) {
+      const remove = document.createElement("button"); remove.className = "button button-secondary"; remove.type = "button"; remove.textContent = "删除规则组";
+      remove.addEventListener("click", () => { if (confirm(`删除规则组“${group.name}”？若仍被方案引用，需先解除关联。`)) routeMutation(`/api/v1/routing/groups?name=${encodeURIComponent(group.name)}`, "DELETE", null, "规则组已删除"); });
+      card.append(remove);
+    }
+    groups.append(card);
   });
+  if (!(routing.ruleGroups || []).length) {
+    const empty = document.createElement("div"); empty.className = "empty-card";
+    renderEmpty(empty, "还没有规则组", "先在上方创建规则组，再添加规则并关联到方案。", {label:"定位到创建入口",run:()=>$("#newRouteGroup").focus()});
+    groups.append(empty);
+  }
+}
+function isBuiltinRouteProfile(name) { return ["global","direct","rule","bypass-cn","proxy-only","bypass-list"].includes(name); }
+async function routeMutation(path, method, payload, success) {
+  if (state.routeBusy) return false;
+  state.routeBusy = true;
+  try {
+    await api(path, {method, ...(payload ? {body:JSON.stringify(payload)} : {})});
+    toast(success); await loadRouting(); await refreshOverview(true);
+    return true;
+  } catch (error) { toast(error.message, "error"); return false; }
+  finally { state.routeBusy = false; }
+}
+function createRouteProfile() {
+  const name = $("#newRouteProfile").value.trim();
+  if (!name) { toast("请输入方案名称", "error"); $("#newRouteProfile").focus(); return; }
+  void routeMutation("/api/v1/routing/profiles", "POST", {name,defaultAction:$("#newRouteDefault").value,groups:[]}, "方案已创建").then(saved => { if (saved) $("#newRouteProfile").value = ""; });
+}
+function createRouteGroup() {
+  const name = $("#newRouteGroup").value.trim();
+  if (!name) { toast("请输入规则组名称", "error"); $("#newRouteGroup").focus(); return; }
+  void routeMutation("/api/v1/routing/groups", "POST", {name}, "规则组已创建").then(saved => { if (saved) $("#newRouteGroup").value = ""; });
 }
 async function useRouteProfile(name,button){setBusy(button,true,"应用中…");try{await api("/api/v1/routing/profiles/use",{method:"POST",body:JSON.stringify({name})});toast(`已应用 ${name}`);await loadRouting();await refreshOverview(true);}catch(error){toast(error.message,"error");}finally{setBusy(button,false);}}
 async function addRouteRule(){const button=$("#addRouteRule");setBusy(button,true,"添加中…");const input={group:$("#routeRuleGroup").value,rule:{action:$("#routeRuleAction").value,type:$("#routeRuleType").value,value:$("#routeRuleValue").value.trim()}};try{if(!input.rule.value)throw new Error("请输入匹配值");await api("/api/v1/routing/rules",{method:"POST",body:JSON.stringify(input)});$("#routeRuleValue").value="";toast("路由规则已添加");await loadRouting();}catch(error){toast(error.message,"error");}finally{setBusy(button,false);}}
-async function removeRouteRule(group,index){if(!confirm(`删除规则组“${group}”中的第 ${index} 条规则？此操作会重载内核。`))return;try{await api(`/api/v1/routing/rules?group=${encodeURIComponent(group)}&index=${index}`,{method:"DELETE"});toast("规则已删除");await loadRouting();}catch(error){toast(error.message,"error");}}
+function openRouteRuleEditor(row, group, index, rule) {
+  const existing = row.nextElementSibling;
+  if (existing?.classList.contains("rule-edit-form")) { existing.remove(); return; }
+  const editor = document.createElement("form"); editor.className = "rule-edit-form";
+  const type = $("#routeRuleType").cloneNode(true); type.removeAttribute("id"); type.value = rule.type;
+  const value = document.createElement("input"); value.value = rule.value; value.required = true; value.setAttribute("aria-label", "规则匹配值");
+  const action = $("#routeRuleAction").cloneNode(true); action.removeAttribute("id"); action.value = rule.action;
+  const save = document.createElement("button"); save.type = "submit"; save.className = "button button-primary"; save.textContent = "保存规则";
+  const cancel = document.createElement("button"); cancel.type = "button"; cancel.className = "button button-secondary"; cancel.textContent = "取消";
+  cancel.addEventListener("click", () => editor.remove());
+  editor.append(type, value, action, save, cancel);
+  editor.addEventListener("submit", async event => {
+    event.preventDefault();
+    const updated = {type:type.value,value:value.value.trim(),action:action.value};
+    if (!updated.value) { toast("请输入规则匹配值", "error"); return; }
+    setBusy(save, true, "保存中…");
+    const saved = await routeMutation("/api/v1/routing/rules", "PATCH", {group,index,expected:rule,rule:updated}, "规则已修改");
+    if (!saved) setBusy(save, false);
+  });
+  row.after(editor); value.focus();
+}
+async function removeRouteRule(group,index,expected){if(!confirm(`删除规则组“${group}”中的第 ${index} 条规则？此操作会重载内核。`))return;await routeMutation(`/api/v1/routing/rules?group=${encodeURIComponent(group)}&index=${index}`,"DELETE",{expected},"规则已删除");}
 
 async function runDoctor() {
   const button = $("#runDoctorButton");
@@ -1086,12 +1184,37 @@ function updateSubscriptionAuthFields() {
   const type = $("#subAuth").value;
   $("#subUsernameRow").classList.toggle("hidden",type !== "basic");
   $("#subSecretRow").classList.toggle("hidden",type === "none");
-  $("#subSecretLabel").textContent = type === "aes" ? "AES 解密密码" : type === "age" ? "AGE 私钥" : "密码或 Token";
+  $("#subDecryptSecretRow").classList.toggle("hidden",$("#subDecrypt").value === "none");
 }
-function openSubscriptionModal() {
+function openSubscriptionModal(sub = null) {
+  const editing = sub && typeof sub.name === "string" ? sub : null;
   closeCommandDialog(false);
   state.modalReturnFocus = document.activeElement;
   const modal = $("#subscriptionModal");
+  const form = $("#subscriptionForm");
+  form.reset();
+  state.editingSubscription = editing;
+  $("#subscriptionTitle").textContent = editing ? `编辑订阅 · ${editing.name}` : "添加订阅";
+  $("#subscriptionSubmit").textContent = editing ? "保存修改" : "添加订阅";
+  $("#subURL").required = !editing;
+  $("#subURL").placeholder = editing ? "留空保留原地址；不回显 URL 中的 Token" : "https://example.com/subscribe?token=…";
+  $("#subURLHint").textContent = editing ? "为了保护 URL 内的 Token，原地址不回填；留空即保留。" : "支持 Clash / Mihomo 兼容订阅";
+  if (editing) {
+    $("#subName").value = editing.name;
+    $("#subGroup").value = editing.group;
+    $("#subUpdateVia").value = editing.updateVia || "direct";
+    $("#subAuth").value = editing.downloadAuthType || "none";
+    $("#subDecrypt").value = editing.decryptionType || "none";
+    $("#subInterval").value = editing.updateInterval || 3600;
+    $("#subHealth").value = editing.healthInterval || 300;
+    $("#subPrefix").value = editing.additionalPrefix || "";
+    $("#subUserAgent").value = editing.options?.userAgent || "";
+    $("#subFilter").value = editing.options?.filter || "";
+    $("#subExcludeFilter").value = editing.options?.excludeFilter || "";
+    $("#subUDP").value = editing.options?.udp || "default";
+    $("#subTFO").value = editing.options?.tfo || "default";
+    $("#subSkipCertVerify").value = editing.options?.skipCertVerify || "default";
+  }
   $("#subscriptionError").textContent = "";
   updateSubscriptionAuthFields();
   modal.classList.add("active"); modal.setAttribute("aria-hidden","false");
@@ -1107,6 +1230,7 @@ function closeSubscriptionModal() {
   document.body.classList.remove("modal-open");
   syncDialogState();
   $("#subscriptionError").textContent = "";
+  state.editingSubscription = null;
   state.modalReturnFocus?.focus();
 }
 function handleDialogKey(event) {
@@ -1159,20 +1283,38 @@ async function handleSubscriptionSubmit(event) {
   if (state.addingSubscription) return;
   state.addingSubscription = true;
   const button = event.submitter;
-  setBusy(button,true,"添加中…");
+  const editing = state.editingSubscription;
+  setBusy(button,true,editing ? "保存中…" : "添加中…");
   $("#subscriptionError").textContent = "";
-  const authType = $("#subAuth").value;
+  const authType = $("#subAuth").value, decryptType = $("#subDecrypt").value;
+  const options = {userAgent:$("#subUserAgent").value.trim(),filter:$("#subFilter").value.trim(),
+    excludeFilter:$("#subExcludeFilter").value.trim(),udp:$("#subUDP").value,tfo:$("#subTFO").value,
+    skipCertVerify:$("#subSkipCertVerify").value};
   const input = {
-    name:$("#subName").value.trim(),url:$("#subURL").value.trim(),authType,
-    username:authType === "basic" ? $("#subUsername").value : "",
-    secret:authType === "none" ? "" : $("#subSecret").value,
+    name:$("#subName").value.trim(),url:$("#subURL").value.trim(),
+    downloadAuth:{type:authType,username:authType === "basic" ? $("#subUsername").value : "",secret:$("#subSecret").value},
+    decryption:{type:decryptType,secret:$("#subDecryptSecret").value},options,
     updateVia:$("#subUpdateVia").value,group:$("#subGroup").value,
     updateInterval:Number($("#subInterval").value),healthInterval:Number($("#subHealth").value),
     healthCheckURL:"https://www.gstatic.com/generate_204",additionalPrefix:$("#subPrefix").value,
   };
   try {
-    await api("/api/v1/subscriptions",{method:"POST",body:JSON.stringify(input)});
-    toast(`订阅 ${input.name} 已添加`);
+    let result;
+    if (editing) {
+      const patch = {reference:editing.name,revision:editing.revision,name:input.name,group:input.group,
+        updateVia:input.updateVia,updateInterval:input.updateInterval,healthInterval:input.healthInterval,
+        additionalPrefix:input.additionalPrefix,options};
+      if (input.url) patch.url = input.url;
+      patch.downloadAuth = {type:authType};
+      if (authType === "basic" && $("#subUsername").value) patch.downloadAuth.username = $("#subUsername").value;
+      if ($("#subSecret").value) patch.downloadAuth.secret = $("#subSecret").value;
+      patch.decryption = {type:decryptType};
+      if ($("#subDecryptSecret").value) patch.decryption.secret = $("#subDecryptSecret").value;
+      result = await api("/api/v1/subscriptions",{method:"PATCH",body:JSON.stringify(patch)});
+    } else {
+      result = await api("/api/v1/subscriptions",{method:"POST",body:JSON.stringify(input)});
+    }
+    toast(result?.warning ? result.message : `订阅 ${input.name} 已${editing ? "更新" : "添加"}`, result?.warning ? "error" : "success");
     event.target.reset();
     state.addingSubscription = false;
     closeSubscriptionModal();
@@ -1247,6 +1389,26 @@ async function createSubscriptionGroup(event) {
   } catch (error) { toast(error.message,"error"); }
   finally { state.groupBusy = false; setBusy($("#createSubscriptionGroup"),false); }
 }
+async function changeSubscriptionGroup(action, button) {
+  const group = state.subscriptionGroups.find(item => item.name === $("#subscriptionGroupSelect").value);
+  if (!group || state.groupBusy) return;
+  const newName = $("#renameSubscriptionGroup").value.trim();
+  if (action === "rename" && (!newName || newName === group.name)) {
+    toast("请输入不同的新分组名称", "error"); return;
+  }
+  if (action === "delete" && !confirm(`删除空分组“${group.name}”？有订阅的分组需要先移动订阅。`)) return;
+  state.groupBusy = true; setBusy(button, true, "处理中…");
+  try {
+    if (action === "rename") await api("/api/v1/subscription-groups", {method:"PATCH",body:JSON.stringify({name:group.name,newName})});
+    else if (action === "delete") await api(`/api/v1/subscription-groups?name=${encodeURIComponent(group.name)}`, {method:"DELETE"});
+    else await api("/api/v1/subscription-groups/action", {method:"POST",body:JSON.stringify({name:group.name,action:group.enabled ? "disable" : "enable"})});
+    await loadSubscriptions(); await refreshOverview(true);
+    if (action === "rename") $("#subscriptionGroupSelect").value = newName;
+    updateSubscriptionGroupControls();
+    toast(action === "rename" ? `已重命名为 ${newName}` : action === "delete" ? "分组已删除" : "分组状态已更新");
+  } catch (error) { toast(error.message, "error"); }
+  finally { state.groupBusy = false; setBusy(button, false); }
+}
 function bindEvents() {
   const on = (selector,event,handler) => $(selector).addEventListener(event,handler);
   $$(".nav-item").forEach(item=>item.addEventListener("click",()=>switchView(item.dataset.view)));
@@ -1299,13 +1461,21 @@ function bindEvents() {
   $$("[data-close-modal]").forEach(item=>item.addEventListener("click",closeSubscriptionModal));
   on("#useSubscriptionGroup","click",useSubscriptionGroup);
   on("#createSubscriptionGroup","click",createSubscriptionGroup);
+  on("#subscriptionGroupSelect","change",updateSubscriptionGroupControls);
+  on("#toggleSubscriptionGroup","click",event=>changeSubscriptionGroup("toggle",event.currentTarget));
+  on("#saveSubscriptionGroupName","click",event=>changeSubscriptionGroup("rename",event.currentTarget));
+  on("#deleteSubscriptionGroup","click",event=>changeSubscriptionGroup("delete",event.currentTarget));
   on("#updateSubscriptionGroup","click",event=>updateSubscriptionBatch($("#subscriptionGroupSelect").value,event.currentTarget));
   on("#updateAllSubscriptions","click",event=>updateSubscriptionBatch("",event.currentTarget));
   on("#testSubscriptionGroup","click",event=>testSubscriptionBatch($("#subscriptionGroupSelect").value,event.currentTarget));
   on("#testAllSubscriptions","click",event=>testSubscriptionBatch("",event.currentTarget));
   on("#installLatestCore","click",event=>installCore(event.currentTarget));
   on("#addRouteRule","click",addRouteRule);
+  on("#createRouteProfile","click",createRouteProfile);
+  on("#createRouteGroup","click",createRouteGroup);
+  on("#restoreRouteDefaults","click",()=>{if(confirm("只补齐缺失的内置方案和规则组，不覆盖自定义规则。继续吗？"))routeMutation("/api/v1/routing/restore","POST",{},"缺失预设已恢复");});
   on("#subAuth","change",updateSubscriptionAuthFields);
+  on("#subDecrypt","change",updateSubscriptionAuthFields);
   on("#runDoctorButton","click",runDoctor);
   on("#refreshLogsButton","click",loadLogs);
   on("#logSearch","input",renderLogs);
@@ -1336,7 +1506,7 @@ async function bootstrap() {
   }, 5000);
   state.logsTimer = setInterval(() => {
     if (state.authenticated && document.visibilityState === "visible" && state.activeView === "logs" && $("#autoLogs").checked) loadLogs();
-  }, 3000);
+  }, 1000);
 }
 
 document.documentElement.dataset.theme=resolvedTheme(renamedPreference(localStorage,"kivo_theme","proxypilot_theme"));

@@ -429,7 +429,8 @@ func run(rawArgs []string) error {
 	}
 	identity := sha256.Sum256([]byte(identityPath))
 	return wails.Run(&options.App{
-		Title: "Kivo", Width: 480, Height: 760, MinWidth: 400, MinHeight: 600,
+		// 以 iPhone 17 Pro Max 的 440×956 pt 为默认比例；上下界防止布局被拉坏。
+		Title: "Kivo", Width: 440, Height: 956, MinWidth: 390, MinHeight: 680, MaxWidth: 600, MaxHeight: 1080,
 		BackgroundColour: options.NewRGB(250, 250, 250),
 		AssetServer:      &assetserver.Options{Assets: desktopAssets{primary: ui, shared: server.EmbeddedAssets()}},
 		OnStartup:        app.startup, OnShutdown: app.shutdown, OnBeforeClose: app.closing, Bind: []interface{}{app},

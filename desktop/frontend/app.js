@@ -2,7 +2,9 @@ import {
   modes,
   coreStates,
   connectionView,
+  checkTime,
   fresh,
+  homeConnectionTitle,
   groupNodes,
   nodeLatency,
   selectedNode,
@@ -36,9 +38,15 @@ const state = {
   phase: "",
   nodeRows: new Map(),
   nodeGroups: new Map(),
+  editor: null,
+  subscriptionResults: new Map(),
+  dataEpoch: 0,
+  doctorLoaded: false,
 };
 const gate = new RefreshGate();
 let toastTimer, lastFocus;
+let doctorLoading = false,
+  logsLoading = false;
 const native = () => window.go?.main?.Desktop;
 
 // 原生托盘状态也需持续刷新；丢失宿主后不能继续承诺“关闭可驻留”。
@@ -139,6 +147,7 @@ function endJob() {
 
 // 忙碌只改变控件状态，不删除列表；原有业务禁用条件单独保存。
 function updateAvailability() {
+  $("editorSave").disabled = state.busy || !state.online;
   document.querySelectorAll("[data-mutation]").forEach((item) => {
     item.disabled = state.busy || item.dataset.blocked === "true";
   });
@@ -242,10 +251,12 @@ function field(form, spec) {
     }
   } else input = element(spec.type === "textarea" ? "textarea" : "input");
   input.name = spec.name;
+  input.setAttribute("aria-label", spec.label);
   if (input.tagName === "INPUT") input.type = spec.type || "text";
   if (spec.type === "checkbox") input.checked = !!spec.value;
-  else input.value = spec.value ?? "";
+  else input.value = String(spec.value ?? "");
   if (spec.placeholder) input.placeholder = spec.placeholder;
+  if (spec.hint) input.title = spec.hint;
   if (spec.required) input.required = true;
   if (spec.type === "password") input.autocomplete = "new-password";
   if (spec.type === "number") {
@@ -342,14 +353,15 @@ function renderOverview() {
         : "验证代理入口与联网情况";
     view.tone = "busy";
   }
-  $("currentNode").textContent =
-    state.overview?.core?.currentNode || "尚未选择节点";
-  $("currentNode").title = state.overview?.core?.currentNode || "";
   $("connect").classList.toggle("pending", !!state.phase);
   $("connect").setAttribute("aria-busy", String(!!state.phase));
-  $("connectionTitle").textContent = view.title;
+  $("connectionTitle").textContent = state.phase
+    ? view.title
+    : homeConnectionTitle(view, state.overview, state.online);
+  $("connectionTitle").title = $("connectionTitle").textContent;
   $("connectionDetail").textContent = view.detail;
-  $("connectionDot").className = `status-dot ${view.tone}`;
+  $("connectionDetail").hidden = !["error", "warn", "busy"].includes(view.tone);
+  $("connectionCard").dataset.tone = view.tone;
   $("connect").setAttribute("aria-checked", String(view.on));
   $("connect").setAttribute(
     "aria-label",
@@ -361,33 +373,16 @@ function renderOverview() {
     state.busy ||
     !state.online ||
     state.overview?.systemProxy?.supported === false;
-  $("checkLabel").textContent = view.check;
-  $("checkLabel").classList.toggle("good-text", view.tone === "good");
+  $("checkLabel").textContent = checkTime(state.overview?.connectivity);
   const core = state.overview?.core;
   $("routeLabel").textContent = modes[core?.mode] || "规则模式";
-  $("coreLabel").textContent = state.online
-    ? `Mihomo ${coreStates[core?.state] || "状态未知"}${core?.version ? " · " + core.version : ""}`
-    : "Mihomo · 状态未知";
-  $("tunLabel").textContent =
-    `TUN ${state.overview?.tunEnabled ? "开启" : "关闭"}`;
-  $("portLabel").textContent = core?.mixedPort
-    ? `HTTP / SOCKS5 · 127.0.0.1:${core.mixedPort} · ${state.online && state.overview.proxyPortListening ? "正在监听" : "未确认监听"}`
-    : "HTTP / SOCKS5 · —";
   const hint = state.overview?.systemProxy?.recoveryPending
     ? "存在未恢复系统代理备份，请到状态页查看，再在设置页恢复。"
     : core?.state === "not_installed"
       ? "首次使用：安装内核 → 添加并更新订阅 → 选择节点 → 打开连接。"
-      : core?.state === "running" && !view.on
-        ? state.overview?.tunEnabled
-          ? "内核运行且已配置 TUN；仅凭配置不能确认虚拟网卡接管，请查看日志和连通测试。"
-          : "内核已经运行，但系统代理未接入 Kivo。打开连接开关完成接入。"
-        : "";
+      : "";
   $("connectionHint").hidden = !hint;
   $("connectionHint").textContent = hint;
-  const report = state.overview?.connectivity;
-  $("lastChecked").textContent = report
-    ? `最近检测 ${new Date(report.checkedAt).toLocaleTimeString("zh-CN", { hour12: false })} · ${fresh(report) ? "结果有效 2 分钟" : "结果已过期"}`
-    : "连接状态不代表联网成功，请运行连通测试";
 }
 // 只移动/更新发生变化的元素，保留 details、焦点和滚动锚点。
 function reconcileChildren(parent, children) {
@@ -419,10 +414,38 @@ function renderNodes() {
       const root = element("details", "node-group"),
         summary = element("summary"),
         name = element("strong"),
-        count = element("span", "count");
-      summary.append(icon("chevron"), name, count);
+        count = element("span", "count"),
+        copy = element("span", "subscription-heading-copy"),
+        feedback = element("p", "subscription-feedback");
+      copy.append(name, count);
+      const update = button(
+        "",
+        (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          updateOneSubscription(group.name);
+        },
+        "icon-button accent",
+      );
+      update.append(icon("refresh"));
+      update.dataset.mutation = "true";
+      update.setAttribute("aria-label", "更新订阅 " + group.name);
+      const edit = button(
+        "",
+        (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          const sub = state.subs.find((s) => s.name === group.name);
+          if (sub) editSubscription(sub);
+        },
+        "icon-button accent",
+      );
+      edit.append(icon("info"));
+      edit.dataset.mutation = "true";
+      edit.setAttribute("aria-label", "编辑订阅 " + group.name);
+      summary.append(icon("chevron"), copy, update, edit);
       root.append(summary);
-      entry = { root, summary, name, count, limit: 80 };
+      entry = { root, summary, name, count, feedback, update, edit, limit: 80 };
       root.addEventListener("toggle", () => {
         if (root.open) state.openGroups.add(group.name);
         else state.openGroups.delete(group.name);
@@ -430,13 +453,32 @@ function renderNodes() {
       state.nodeGroups.set(group.name, entry);
     }
     setText(entry.name, group.name);
+    const subscription = state.subs.find((s) => s.name === group.name);
+    entry.edit.hidden = entry.update.hidden = !subscription;
+    entry.update.dataset.blocked = String(!state.online || !group.enabled);
+    entry.edit.dataset.blocked = String(!state.online);
+    entry.update.title =
+      "更新订阅 · " +
+      (subscription?.updateVia === "proxy" ? "通过代理" : "直连");
     setText(
       entry.count,
-      group.nodes.length + " 个节点" + (group.enabled ? "" : " · 已禁用"),
+      group.nodes.length +
+        " 个节点" +
+        (group.enabled
+          ? subscription?.updateVia === "proxy"
+            ? " · 代理更新"
+            : " · 直连更新"
+          : " · 已禁用"),
     );
     const open = state.openGroups.has(group.name) || !!$("nodeSearch").value;
     if (entry.root.open !== open) entry.root.open = open;
     const rows = [entry.summary];
+    const result = state.subscriptionResults.get(group.name);
+    if (result) {
+      setText(entry.feedback, result.text);
+      entry.feedback.classList.toggle("failed", !!result.error);
+      rows.push(entry.feedback);
+    }
     for (const node of group.nodes.slice(0, entry.limit)) {
       const key = JSON.stringify([group.name, node.name]);
       usedRows.add(key);
@@ -625,6 +667,25 @@ function actionRow(card, items) {
   if (menu.children.length) actions.append(more);
   card.append(actions);
 }
+function subscriptionSecurityLabel(sub) {
+  const decrypt =
+    sub.decryptionType ||
+    (["aes", "age"].includes(sub.authType) ? sub.authType : "none");
+  const auth =
+    sub.downloadAuthType ||
+    (["aes", "age"].includes(sub.authType) ? "none" : sub.authType) ||
+    "none";
+  const labels = [];
+  if (decrypt !== "none")
+    labels.push(decrypt === "age" ? "age 解密" : "AES 解密");
+  if (auth !== "none")
+    labels.push(
+      { basic: "Basic 认证", bearer: "Bearer 认证", token: "Token 认证" }[
+        auth
+      ] || "下载认证",
+    );
+  return labels.join(" · ") || "普通订阅";
+}
 function renderConfig() {
   const staged = {};
   staged.subscriptions = element("div");
@@ -639,7 +700,7 @@ function renderConfig() {
   for (const sub of state.subs) {
     const card = record(
       sub.name,
-      `${sub.group || "默认分组"} · ${sub.authType || "none"} · 默认${sub.updateVia === "proxy" ? "代理" : "直连"}更新`,
+      `${sub.group || "默认分组"} · ${subscriptionSecurityLabel(sub)} · ${sub.updateVia === "proxy" ? "代理" : "直连"}更新`,
       sub.enabled ? "已启用" : "已禁用",
       sub.enabled,
     );
@@ -689,6 +750,7 @@ function renderConfig() {
     );
     actionRow(card, [
       ["更新组", () => updateDialog("", group.name)],
+      ["重命名", () => renameSubscriptionGroup(group), false, group.name === "default"],
       [
         "仅使用此组",
         () =>
@@ -714,7 +776,7 @@ function renderConfig() {
         () =>
           confirm(
             "删除分组",
-            `删除「${group.name}」？存在订阅时后台会拒绝删除。`,
+          `删除「${group.name}」？存在订阅时后台会拒绝删除。默认分组不可删除。`,
             () =>
               perform("删除分组…", () =>
                 api(
@@ -726,20 +788,35 @@ function renderConfig() {
             true,
           ),
         true,
+        group.name === "default",
       ],
     ]);
-    card.dataset.revision = JSON.stringify(group);
+    card.dataset.revision = JSON.stringify([group, state.subs.filter((sub) => sub.group === group.name).length]);
     staged.subscriptionGroups.append(card);
   }
   staged.profiles = element("div");
   for (const profile of state.routing?.profiles || []) {
     const active = state.routing.activeProfile === profile.name;
+    const builtin = ["global", "direct", "rule", "bypass-cn", "proxy-only", "bypass-list"].includes(profile.name);
     const card = record(
       profile.name,
       `未匹配：${{ proxy: "代理", direct: "直连", reject: "拒绝" }[profile.defaultAction] || profile.defaultAction} · ${profile.groups?.length || 0} 个规则组`,
-      active ? "使用中" : "",
+      active ? "使用中" : builtin ? "内置方案" : "",
       active,
     );
+    if (profile.groups?.length) {
+      const chips = element("div", "route-group-chips");
+      for (const name of profile.groups) {
+        const chip = button(`${name} ×`, () =>
+          confirm("解除规则组", `从「${profile.name}」中解除「${name}」？规则组不会被删除。`, () =>
+            perform("解除规则组…", () => api("/api/v1/routing/profiles", "PATCH", {
+              profile: profile.name, group: name, attached: false,
+            })), "解除关联"), "route-group-chip");
+        chip.title = `从 ${profile.name} 解除 ${name}`;
+        chips.append(chip);
+      }
+      card.append(chips);
+    }
     actionRow(card, [
       [
         "使用",
@@ -748,13 +825,13 @@ function renderConfig() {
             api("/api/v1/routing/profiles/use", "POST", { name: profile.name }),
           ),
       ],
-      ["规则组", () => profileGroups(profile)],
+      ["关联组", () => profileGroups(profile)],
       [
         "删除",
         () =>
           confirm(
             "删除路由配置",
-            `删除「${profile.name}」？活动配置与内置配置受到后台保护。`,
+            `删除自定义路由配置「${profile.name}」？内置方案与当前方案不能删除。`,
             () =>
               perform("删除路由…", () =>
                 api(
@@ -766,6 +843,7 @@ function renderConfig() {
             true,
           ),
         true,
+        active || builtin,
       ],
     ]);
     card.dataset.revision = JSON.stringify(profile);
@@ -773,6 +851,7 @@ function renderConfig() {
   }
   staged.ruleGroups = element("div");
   for (const group of state.routing?.ruleGroups || []) {
+    const builtin = ["中国大陆直连", "指定地址代理", "指定地址直连"].includes(group.name);
     const card = record(group.name, `${group.rules?.length || 0} 条规则`);
     actionRow(card, [
       ["查看 / 编辑", () => ruleEditor(group)],
@@ -794,6 +873,7 @@ function renderConfig() {
             true,
           ),
         true,
+        builtin,
       ],
     ]);
     card.dataset.revision = JSON.stringify(group);
@@ -805,9 +885,14 @@ function renderConfig() {
 function renderData() {
   const view = connectionView(state.overview, state.online);
   $("statusConclusion").textContent = view.title;
-  $("statusExplanation").textContent = state.online
+  const explanation = state.online
     ? state.overview?.connection?.detail || view.detail
     : view.detail;
+  // 已启用时不重复显示“内核运行不等于外网可用”的泛化提示；检测证据留在下方。
+  $("statusExplanation").textContent = view.on &&
+    explanation === "内核运行不等于外网可用；请执行一次联网检测。"
+    ? "" : explanation;
+  $("statusExplanation").hidden = !$("statusExplanation").textContent;
   $("statusSummary").dataset.tone = view.tone;
   const key = JSON.stringify([
     state.overview,
@@ -887,6 +972,80 @@ function renderData() {
     $("connectivityResults").append(card);
   }
 }
+
+// 诊断是只读本机检查。进入状态页即运行一次；手动重试沿用相同入口。
+async function loadDoctor() {
+  if (doctorLoading || state.tab !== "data" || state.editor || document.hidden)
+    return;
+  if (!state.online) {
+    $("doctorStatus").textContent = "后台未连接";
+    return;
+  }
+  doctorLoading = true;
+  const epoch = state.dataEpoch;
+  $("doctor").disabled = true;
+  $("doctorStatus").textContent = "正在检查…";
+  try {
+    const items = await api("/api/v1/doctor");
+    if (epoch !== state.dataEpoch || state.tab !== "data") return;
+    $("doctorResults").replaceChildren();
+    for (const item of items || [])
+      $("doctorResults").append(
+        record(
+          item.name,
+          item.message,
+          item.status === "ok" ? "正常" : "需关注",
+          item.status === "ok",
+        ),
+      );
+    if (!items?.length)
+      $("doctorResults").append(element("p", "empty-note", "暂无诊断项目"));
+    state.doctorLoaded = true;
+    $("doctorStatus").textContent = "已更新";
+  } catch (error) {
+    if (epoch !== state.dataEpoch || state.tab !== "data") return;
+    $("doctorStatus").textContent = "读取失败";
+    if (!state.doctorLoaded)
+      $("doctorResults").replaceChildren(
+        element("p", "empty-note error-text", `诊断失败：${error.message}`),
+      );
+  } finally {
+    doctorLoading = false;
+    $("doctor").disabled = false;
+  }
+}
+
+// 内核已经将 stdout/stderr 写入有界内存日志；可见的状态页每秒读取最新 200 行。
+async function loadLogs() {
+  if (logsLoading || state.tab !== "data" || state.editor || document.hidden)
+    return;
+  if (!state.online) {
+    $("logStatus").textContent = "后台未连接";
+    return;
+  }
+  logsLoading = true;
+  const epoch = state.dataEpoch;
+  $("refreshLogs").disabled = true;
+  try {
+    const lines = await api("/api/v1/logs?limit=200");
+    if (epoch !== state.dataEpoch || state.tab !== "data") return;
+    const log = $("logs");
+    const nearBottom = log.scrollHeight - log.clientHeight - log.scrollTop < 32;
+    const content =
+      (lines || []).join("\n") || "暂无内核日志；启动内核后会自动显示";
+    if (log.textContent !== content) {
+      log.textContent = content;
+      if (nearBottom) log.scrollTop = log.scrollHeight;
+    }
+    $("logStatus").textContent = "";
+  } catch (error) {
+    if (epoch !== state.dataEpoch || state.tab !== "data") return;
+    $("logStatus").textContent = `更新失败：${error.message}`;
+  } finally {
+    logsLoading = false;
+    $("refreshLogs").disabled = false;
+  }
+}
 function renderSettings(preserveForm = false) {
   renderTray();
   setText(
@@ -915,7 +1074,8 @@ function renderSettings(preserveForm = false) {
     ? state.settings?.revision !== state.draft?.revision
       ? "其他客户端已修改设置。当前草稿已保留；重新读取后再保存。"
       : "有未保存的修改"
-    : "与后台设置同步";
+    : "";
+  $("settingsDraft").hidden = !state.dirty;
   $("reloadSettings").hidden = !state.dirty;
   $("coreStart").dataset.blocked = String(
     state.overview?.core?.state === "running",
@@ -926,52 +1086,21 @@ function renderSettings(preserveForm = false) {
   $("coreRestart").dataset.blocked = String(
     state.overview?.core?.state === "not_installed",
   );
-  $("installedCore").textContent =
-    `${state.overview?.core?.version || "尚未安装"} · ${coreStates[state.overview?.core?.state] || "状态未知"}`;
+  $("coreRunState").textContent = coreStates[state.overview?.core?.state] || "状态未知";
+  $("installedCore").textContent = state.overview?.core?.version || "尚未安装";
+  const coreRunning = state.overview?.core?.state === "running";
+  const activeInstallation = state.versions.find((item) => item.active);
+  $("activeCoreBadge").hidden = !coreRunning || !activeInstallation ||
+    activeInstallation.version !== state.overview?.core?.version;
+  $("coreStart").hidden = coreRunning;
+  $("coreStop").hidden = !coreRunning;
+  $("coreUse").dataset.blocked = String(!state.versions.some((item) => !item.active));
+  $("coreDelete").dataset.blocked = String(!state.versions.some((item) => !item.active));
   $("webSecurityLabel").textContent = state.security?.authEnabled
     ? "已开启 Token"
     : "无需 Token";
-  const versionsStage = element("div");
-  for (const item of state.versions) {
-    const row = record(
-      item.version,
-      "",
-      item.active ? "当前版本" : "",
-      item.active,
-    );
-    actionRow(row, [
-      [
-        "切换",
-        () =>
-          perform("切换内核…", () =>
-            api("/api/v1/core/use", "POST", { reference: item.version }),
-          ),
-        false,
-        item.active,
-      ],
-      [
-        "删除",
-        () =>
-          confirm(
-            "删除内核版本",
-            `删除 ${item.version} 的本地文件？活动内核不能被删除。`,
-            () =>
-              perform("删除内核…", () =>
-                api(
-                  `/api/v1/core/installations?reference=${encodeURIComponent(item.version)}`,
-                  "DELETE",
-                ),
-              ),
-            "删除",
-            true,
-          ),
-        true,
-        item.active,
-      ],
-    ]);
-    row.dataset.revision = JSON.stringify(item);
-    versionsStage.append(row);
-  }
+  const recovery = $("coreRecovery");
+  recovery.replaceChildren();
   if (state.overview?.systemProxy?.recoveryPending) {
     const b = button(
       "恢复系统代理备份",
@@ -989,9 +1118,8 @@ function renderSettings(preserveForm = false) {
     b.id = "recoverProxy";
     b.dataset.key = "recover";
     b.dataset.revision = "recover";
-    versionsStage.append(b);
+    recovery.append(b);
   }
-  reconcileCards($("coreVersions"), [...versionsStage.children]);
   $("appInfo").textContent = state.info
     ? `Kivo ${state.info.version} · ${state.info.platform} / ${state.info.architecture}`
     : "Kivo Desktop";
@@ -1089,6 +1217,10 @@ async function refreshAll() {
 }
 
 function setTab(tab, focus = false) {
+  if (state.editor) {
+    leaveSubscriptionEditor(() => setTab(tab, focus));
+    return;
+  }
   const content = $("content");
   const changed = tab !== state.tab;
   if (changed) {
@@ -1104,6 +1236,12 @@ function setTab(tab, focus = false) {
     if (active && focus) b.focus();
   }
   if (changed) content.scrollTop = state.scroll[tab] || 0;
+  if (changed) state.dataEpoch++;
+  if (changed && tab === "data") {
+    state.doctorLoaded = false;
+    void loadDoctor();
+    void loadLogs();
+  }
   const keys =
     tab === "settings"
       ? ["settings", "versions", "security"]
@@ -1133,7 +1271,7 @@ async function connect() {
     );
   if (state.overview?.core?.state === "not_installed") {
     setTab("settings");
-    $("coreSection").open = true;
+    $("coreSection").scrollIntoView({ behavior: "smooth", block: "start" });
     message("请先安装 Mihomo 内核，再添加并更新订阅");
     return;
   }
@@ -1167,7 +1305,7 @@ async function connect() {
 }
 function routeDialog() {
   formDialog(
-    "全局路由",
+    "代理模式",
     [
       {
         name: "mode",
@@ -1198,7 +1336,7 @@ function updateDialog(reference = "all", group = "", kind = "update") {
           ["direct", "直连（不使用 HTTP 系统代理）"],
           ["proxy", "通过当前 PROXY 节点"],
         ],
-        value: "direct",
+        value: "",
       },
     ],
     async (values) => {
@@ -1210,6 +1348,7 @@ function updateDialog(reference = "all", group = "", kind = "update") {
           group,
           via: values.via,
         });
+        rememberSubscriptionResults(result.data);
         await refreshChanged();
         closeDialog();
         const body = dialog(title + "结果");
@@ -1237,124 +1376,466 @@ function updateDialog(reference = "all", group = "", kind = "update") {
     },
   );
 }
-const authOptions = [
-  ["none", "无需认证"],
-  ["aes", "AES 解密密码"],
-  ["age", "age 解密密码"],
-  ["basic", "Basic 用户名 / 密码"],
-  ["bearer", "Bearer Token"],
-  ["token", "Token 参数"],
-];
-function subscriptionSpecs(sub) {
-  return [
-    { name: "name", label: "订阅名称", value: sub?.name || "", required: true },
-    {
-      name: "url",
-      label: sub ? "替换订阅地址（留空保留原值）" : "订阅地址",
-      type: "url",
-      required: !sub,
-      placeholder: "https://…",
-      hint: sub
-        ? "原地址已脱敏，不会把脱敏值重新保存为真实地址。"
-        : "仅接受 HTTP / HTTPS 地址",
-    },
-    {
-      name: "group",
-      label: "分组",
-      options: state.groups.length
-        ? state.groups.map((g) => g.name)
-        : ["default"],
-      value: sub?.group || "default",
-    },
-    {
-      name: "authType",
-      label: "认证 / 解密方式",
-      options: authOptions,
-      value: sub?.authType || "none",
-    },
-    {
-      name: "username",
-      label: "Basic 用户名",
-      placeholder: sub ? "留空保留原用户名" : "仅 Basic 认证需要",
-    },
-    {
-      name: "secret",
-      label: "密码 / Token",
-      type: "password",
-      placeholder: sub ? "留空保留原凭据" : "AES / age 填解密密码",
-    },
-    {
-      name: "updateVia",
-      label: "默认更新路径",
-      options: [
-        ["direct", "直连"],
-        ["proxy", "通过当前节点"],
-      ],
-      value: sub?.updateVia || "direct",
-    },
-  ];
+function rememberSubscriptionResults(data) {
+  for (const item of data?.results || []) {
+    const via = item.via === "proxy" ? "代理" : "直连";
+    state.subscriptionResults.set(item.name, {
+      error: !!item.error,
+      text: item.error
+        ? `${via}更新失败：${item.error}`
+        : `${via}更新完成 · ${item.nodeCount == null ? "节点数待确认" : "解析 " + item.nodeCount + " 个节点"}${data.temporarilyStartedCore ? " · 内核已恢复停止" : ""}`,
+    });
+  }
 }
-function addSubscription() {
-  formDialog(
-    "添加订阅",
-    subscriptionSpecs(),
-    (v) =>
-      mutate("添加订阅…", "/api/v1/subscriptions", "POST", {
-        ...v,
-        updateInterval: 3600,
-        healthInterval: 300,
-        healthCheckURL: "https://www.gstatic.com/generate_204",
-      }),
-    {
-      copy: "订阅与 CLI / Web 共用。添加后需更新订阅，成功解析后才能看到节点。",
-      submitLabel: "添加订阅",
+async function updateOneSubscription(name) {
+  if (state.busy) return;
+  state.subscriptionResults.set(name, { text: "正在更新订阅…" });
+  renderNodes();
+  await perform(
+    "正在更新订阅…",
+    async () => {
+      try {
+        const result = await reply("/api/v1/subscriptions/update", "POST", {
+          reference: name,
+        });
+        rememberSubscriptionResults(result.data);
+        if (result.error || result.status >= 400)
+          throw new Error(result.error || "更新失败");
+        if (!result.data?.results?.length)
+          state.subscriptionResults.set(name, {
+            text: "更新请求完成，节点统计待确认",
+          });
+      } catch (error) {
+        state.subscriptionResults.set(name, {
+          text: "更新失败：" + error.message,
+          error: true,
+        });
+        throw error;
+      } finally {
+        renderNodes();
+      }
     },
+    { success: "" },
   );
 }
+const authOptions = [
+  ["none", "无需认证"],
+  ["basic", "Basic 用户名 / 密码"],
+  ["bearer", "Bearer Token"],
+  ["token", "Authorization: token 请求头"],
+];
+function addSubscription() {
+  openSubscriptionEditor(null);
+}
 function editSubscription(sub) {
-  formDialog("编辑订阅", subscriptionSpecs(sub), (v) => {
-    const body = {
-      reference: sub.name,
-      name: v.name,
-      group: v.group,
-      updateVia: v.updateVia,
-    };
-    if (v.url) body.url = v.url;
-    if (v.authType !== sub.authType || v.secret || v.username) {
-      body.authType = v.authType;
-      if (v.secret) body.secret = v.secret;
-      if (v.username) body.username = v.username;
-    }
-    return mutate("修改订阅…", "/api/v1/subscriptions", "PATCH", body);
+  openSubscriptionEditor(sub);
+}
+
+// 编辑页拥有独立的内存草稿；后台轮询不能重建表单，密码也不进入 localStorage。
+function openSubscriptionEditor(sub) {
+  if (state.editor || state.busy) return;
+  const editor = {
+    sub,
+    fields: {},
+    dirty: false,
+    scroll: $("content").scrollTop,
+    focus: document.activeElement,
+  };
+  state.editor = editor;
+  $("mainHeader").hidden = $("mainTabs").hidden = true;
+  $("panel-" + state.tab).hidden = true;
+  $("editorHeader").hidden = $("subscriptionEditor").hidden = false;
+  $("editorTitle").textContent = sub ? "编辑订阅" : "添加订阅";
+  $("editorError").textContent = "";
+  $("content").scrollTop = 0;
+  const form = $("subscriptionForm");
+  form.replaceChildren();
+  const type = element("div", "group editor-type");
+  type.append(
+    element("span", "editor-type-label", "类型"),
+    element("span", "editor-type-value", "订阅"),
+  );
+  form.append(type);
+  const basic = element(
+    "div",
+    `group editor-fields editor-basic${sub ? " editor-edit" : ""}`,
+  );
+  form.append(basic);
+  const add = (parent, spec) => {
+    const input = field(parent, spec);
+    editor.fields[spec.name] = input;
+    return input;
+  };
+  add(basic, {
+    name: "url",
+    label: "订阅地址",
+    type: "url",
+    required: !sub,
+    placeholder: sub ? "留空保留原地址" : "https://…（必填）",
+    hint: sub
+      ? "原地址已脱敏，不回填、不覆盖。仅需更换时输入完整新地址。"
+      : "完整粘贴平台提供的链接，URL 中已有 Token 时无需额外认证。",
   });
+  add(basic, {
+    name: "name",
+    label: "名称",
+    value: sub?.name || "",
+    required: !!sub,
+    placeholder: "可选，默认使用订阅域名",
+  });
+  const secret = add(basic, {
+    name: "decryptSecret",
+    label: "解密密码",
+    type: "password",
+    placeholder: sub
+      ? "留空保留已有密码或私钥"
+      : "普通订阅留空；密码保护订阅填写密码",
+    hint: "填写密码默认使用已支持的 AES 兼容格式；其他格式请展开高级设置。不是节点密码。",
+  });
+  const reveal = button(
+    "显示",
+    () => {
+      secret.type = secret.type === "password" ? "text" : "password";
+      reveal.textContent = secret.type === "password" ? "显示" : "隐藏";
+      reveal.setAttribute("aria-pressed", String(secret.type === "text"));
+    },
+    "text-button reveal-secret",
+  );
+  reveal.setAttribute("aria-label", "显示或隐藏解密凭据");
+  secret.parentNode.append(reveal);
+  add(basic, {
+    name: "updateVia",
+    label: "更新方式",
+    options: [
+      ["direct", "直连"],
+      ["proxy", "通过当前代理节点"],
+    ],
+    value: sub?.updateVia || "direct",
+    hint: "直连忽略 HTTP 代理；系统 VPN、TUN 或网关仍可能影响实际路径。",
+  });
+  const advanced = element("details", "section-disclosure editor-advanced");
+  advanced.append(element("summary", "", "高级设置"));
+  form.append(advanced);
+  const section = (title, hint) => {
+    advanced.append(element("h2", "editor-section-title", title));
+    if (hint) advanced.append(element("p", "footnote", hint));
+    const group = element("div", "group editor-fields");
+    advanced.append(group);
+    return group;
+  };
+  const decryptGroup = section(
+    "内容解密",
+    "解密发生在下载之后，不会把解密密码作为登录凭据发送。",
+  );
+  const originalDecrypt =
+    sub?.decryptionType ||
+    (["aes", "age"].includes(sub?.authType) ? sub.authType : "none");
+  add(decryptGroup, {
+    name: "decryptionType",
+    label: "解密格式",
+    options: [
+      ["none", "未加密"],
+      ["aes", "AES-CBC 兼容格式"],
+      ["age", "age 私钥（非普通口令）"],
+    ],
+    value: originalDecrypt,
+  });
+  const download = section(
+    "订阅下载",
+    "下载认证与内容解密相互独立，可同时使用。默认无需额外认证。",
+  );
+  const originalAuth =
+    sub?.downloadAuthType ||
+    (["aes", "age"].includes(sub?.authType) ? "none" : sub?.authType) ||
+    "none";
+  add(download, {
+    name: "downloadAuthType",
+    label: "下载认证",
+    options: authOptions,
+    value: originalAuth,
+  });
+  add(download, {
+    name: "username",
+    label: "Basic 用户名",
+    placeholder: sub ? "留空保留已有用户名" : "Basic 认证用户名",
+  });
+  add(download, {
+    name: "authSecret",
+    label: "认证密码 / Token",
+    type: "password",
+    placeholder: sub ? "留空保留已有凭据" : "仅用于订阅下载认证",
+  });
+  add(download, {
+    name: "userAgent",
+    label: "客户端标识（User-Agent）",
+    value: sub?.options?.userAgent || "",
+    placeholder: "默认 Clash.Meta",
+    hint: "不是代理服务器地址。更改后，服务商可能返回不同的订阅格式。",
+  });
+  add(download, {
+    name: "updateInterval",
+    label: "自动更新周期（秒）",
+    type: "number",
+    min: 60,
+    max: 604800,
+    required: true,
+    value: sub?.updateInterval || 3600,
+  });
+  add(download, {
+    name: "group",
+    label: "订阅分组",
+    options: state.groups.length
+      ? state.groups.map((g) => g.name)
+      : ["default"],
+    value: sub?.group || state.groups[0]?.name || "default",
+  });
+  const filtering = section(
+    "节点过滤",
+    "只改变此订阅的节点列表，不是网站分流。使用 Go/RE2 正则，不支持前后查找。",
+  );
+  add(filtering, {
+    name: "filter",
+    label: "保留名称匹配",
+    value: sub?.options?.filter || "",
+    placeholder: "例如：香港|日本；留空保留全部",
+  });
+  add(filtering, {
+    name: "excludeFilter",
+    label: "排除名称匹配",
+    value: sub?.options?.excludeFilter || "",
+    placeholder: "例如：过期|剩余流量；留空不排除",
+  });
+  const overrides = section(
+    "节点连接设置",
+    "跟随订阅不覆盖原始值；仅对支持相应功能的节点生效。",
+  );
+  const choices = [
+    ["default", "跟随订阅"],
+    ["on", "开启"],
+    ["off", "关闭"],
+  ];
+  add(overrides, {
+    name: "udp",
+    label: "UDP 转发",
+    options: choices,
+    value: sub?.options?.udp || "default",
+    hint: "转发应用的 UDP 流量，不影响订阅下载方式。",
+  });
+  add(overrides, {
+    name: "tfo",
+    label: "TCP 快速打开",
+    options: choices,
+    value: sub?.options?.tfo || "default",
+  });
+  add(overrides, {
+    name: "skipCertVerify",
+    label: "节点证书验证",
+    options: [
+      ["default", "跟随订阅"],
+      ["off", "严格验证"],
+      ["on", "跳过验证（不安全）"],
+    ],
+    value: sub?.options?.skipCertVerify || "default",
+    hint: "跳过验证可能遭到中间人攻击；此设置不会关闭订阅网站的 HTTPS 验证。",
+  });
+  const controls = editor.fields;
+  const updateFields = () => {
+    controls.username.parentNode.hidden =
+      controls.downloadAuthType.value !== "basic";
+    controls.authSecret.parentNode.hidden =
+      controls.downloadAuthType.value === "none";
+    secret.parentNode.children[0].textContent =
+      controls.decryptionType.value === "age" ? "age 解密私钥" : "解密密码";
+    secret.setAttribute(
+      "aria-label",
+      controls.decryptionType.value === "age" ? "age 解密私钥" : "解密密码",
+    );
+  };
+  controls.downloadAuthType.addEventListener("change", updateFields);
+  controls.decryptionType.addEventListener("change", () => {
+    editor.explicitFormat = true;
+    if (controls.decryptionType.value === "none") secret.value = "";
+    updateFields();
+  });
+  secret.addEventListener("input", () => {
+    if (secret.value && controls.decryptionType.value === "none")
+      controls.decryptionType.value = "aes";
+    if (!secret.value && originalDecrypt === "none" && !editor.explicitFormat)
+      controls.decryptionType.value = "none";
+  });
+  form.oninput = form.onchange = () => {
+    editor.dirty = true;
+  };
+  form.onsubmit = saveSubscriptionEditor;
+  updateFields();
+  updateAvailability();
+  controls.url.focus();
+}
+
+// 凭据留空代表保留，不发送脱敏字符串；换认证类型时要求重新输入，避免跨协议复用密码。
+function subscriptionEditorPayload(editor) {
+  const sub = editor.sub,
+    f = editor.fields;
+  const value = (name) => f[name].value.trim();
+  const auth = { type: value("downloadAuthType") },
+    decrypt = { type: value("decryptionType") };
+  const originalAuth =
+    sub?.downloadAuthType ||
+    (["aes", "age"].includes(sub?.authType) ? "none" : sub?.authType) ||
+    "none";
+  const originalDecrypt =
+    sub?.decryptionType ||
+    (["aes", "age"].includes(sub?.authType) ? sub.authType : "none");
+  if (auth.type !== "none") {
+    if (auth.type === "basic" && value("username"))
+      auth.username = value("username");
+    if (f.authSecret.value) auth.secret = f.authSecret.value;
+    if (
+      (!sub || originalAuth !== auth.type) &&
+      (!auth.secret || (auth.type === "basic" && !auth.username))
+    )
+      throw new Error("请填写完整的下载认证凭据");
+  }
+  if (decrypt.type !== "none") {
+    if (f.decryptSecret.value) decrypt.secret = f.decryptSecret.value;
+    if ((!sub || originalDecrypt !== decrypt.type) && !decrypt.secret)
+      throw new Error("请填写解密密码或 age 私钥");
+  }
+  const body = {
+    name: value("name"),
+    group: value("group"),
+    updateVia: value("updateVia"),
+    updateInterval: Number(value("updateInterval")),
+    downloadAuth: auth,
+    decryption: decrypt,
+    options: Object.fromEntries(
+      [
+        "userAgent",
+        "filter",
+        "excludeFilter",
+        "udp",
+        "tfo",
+        "skipCertVerify",
+      ].map((name) => [name, value(name)]),
+    ),
+  };
+  if (!sub || value("url")) body.url = value("url");
+  if (sub) {
+    body.reference = sub.name;
+    body.revision = sub.revision;
+  }
+  return body;
+}
+
+async function saveSubscriptionEditor(event) {
+  event.preventDefault();
+  const editor = state.editor;
+  if (!editor || state.busy) return;
+  $("editorError").textContent = "";
+  try {
+    if (!state.online)
+      throw new Error("后台未连接，请恢复连接后保存；当前输入会保留");
+    if (
+      !state.overview?.subscriptionEditorVersion ||
+      (editor.sub && !editor.sub.revision)
+    )
+      throw new Error("后台版本较旧，请重启新版后台后再保存，避免丢失高级配置");
+    const body = subscriptionEditorPayload(editor);
+    // 保存期间冻结输入，避免请求发出后新增的编辑被误当成已保存。
+    Object.values(editor.fields).forEach((input) => {
+      input.disabled = true;
+    });
+    const result = await mutate(
+      "保存订阅配置…",
+      "/api/v1/subscriptions",
+      editor.sub ? "PATCH" : "POST",
+      body,
+    );
+    editor.dirty = false;
+    closeSubscriptionEditor();
+    message(
+      result?.warning
+        ? result.message
+        : "订阅已保存；点击该订阅的更新按钮加载节点，不会自动启用系统代理",
+      !!result?.warning,
+    );
+  } catch (error) {
+    $("editorError").textContent = error.message;
+    $("editorError").scrollIntoView?.({ block: "nearest" });
+    $("editorError").focus();
+  } finally {
+    Object.values(editor.fields).forEach((input) => {
+      input.disabled = false;
+    });
+    updateAvailability();
+  }
+}
+function closeSubscriptionEditor() {
+  const editor = state.editor;
+  if (!editor) return;
+  state.editor = null;
+  $("subscriptionForm").replaceChildren();
+  $("editorHeader").hidden = $("subscriptionEditor").hidden = true;
+  $("mainHeader").hidden = $("mainTabs").hidden = false;
+  $("panel-" + state.tab).hidden = false;
+  $("content").scrollTop = editor.scroll;
+  editor.focus?.focus();
+}
+function leaveSubscriptionEditor(next = () => {}) {
+  if (state.busy) {
+    message("正在保存，请等待完成");
+    return;
+  }
+  const leave = () => {
+    closeSubscriptionEditor();
+    next();
+  };
+  if (state.editor?.dirty)
+    confirm(
+      "放弃未保存的修改？",
+      "返回后当前草稿将被清除，已有订阅不会改变。",
+      leave,
+      "放弃修改",
+      true,
+    );
+  else leave();
 }
 function profileGroups(profile) {
-  const groups = state.routing?.ruleGroups || [];
+  const groups = (state.routing?.ruleGroups || []).filter((group) =>
+    !(profile.groups || []).some((name) => name.toLowerCase() === group.name.toLowerCase()));
   if (!groups.length) {
-    message("请先创建规则组");
+    message("没有可关联的规则组；已关联的规则组可点击名称旁的 × 解除");
     return;
   }
   formDialog(
     "关联规则组",
-    [
-      { name: "group", label: "规则组", options: groups.map((g) => g.name) },
-      {
-        name: "attached",
-        label: "关联到此配置（取消为解除关联）",
-        type: "checkbox",
-        value: true,
-      },
-    ],
+    [{ name: "group", label: "选择规则组", options: groups.map((g) => g.name) }],
     (v) =>
       mutate("更新路由关联…", "/api/v1/routing/profiles", "PATCH", {
         profile: profile.name,
         ...v,
+        attached: true,
       }),
     {
-      copy: `配置「${profile.name}」当前关联：${profile.groups?.join("、") || "无"}`,
+      copy: `当前关联：${profile.groups?.join("、") || "无"}。规则按关联顺序匹配；解除请点击配置卡片上的规则组标签。`,
     },
   );
 }
+
+function renameSubscriptionGroup(group) {
+  formDialog("重命名订阅分组", [
+    { name: "newName", label: "新名称", value: group.name, required: true },
+  ], ({ newName }) => mutate("重命名分组…", "/api/v1/subscription-groups", "PATCH", {
+    name: group.name, newName,
+  }), { copy: "分组中的订阅会一起更新引用，不会删除订阅。" });
+}
+const routeRuleTypeOptions = [
+  ["domain", "精确域名"], ["domain-suffix", "域名后缀"], ["domain-keyword", "域名关键词"],
+  ["domain-wildcard", "域名通配符"], ["domain-regex", "域名正则"],
+  ["ip-cidr", "IPv4 CIDR"], ["ip-cidr6", "IPv6 CIDR"],
+  ["geoip", "GeoIP"], ["geosite", "GeoSite"],
+  ["process-name", "进程名称"], ["process-path", "进程路径"], ["dst-port", "目标端口"],
+];
 function addRule(group) {
   formDialog(
     "添加路由规则",
@@ -1362,15 +1843,7 @@ function addRule(group) {
       {
         name: "type",
         label: "匹配方式",
-        options: [
-          ["domain", "精确域名"],
-          ["domain-suffix", "域名后缀"],
-          ["domain-keyword", "域名关键词"],
-          ["ip-cidr", "IPv4 CIDR"],
-          ["ip-cidr6", "IPv6 CIDR"],
-          ["geoip", "GeoIP"],
-          ["process-name", "进程名称"],
-        ],
+        options: routeRuleTypeOptions,
       },
       {
         name: "value",
@@ -1395,6 +1868,15 @@ function addRule(group) {
     },
   );
 }
+function editRule(group, index, rule) {
+  formDialog("修改路由规则", [
+    { name: "type", label: "匹配方式", options: routeRuleTypeOptions, value: rule.type },
+    { name: "value", label: "匹配值", value: rule.value, required: true },
+    { name: "action", label: "匹配后动作", options: [["proxy", "走代理"], ["direct", "直连"], ["reject", "拒绝"]], value: rule.action },
+  ], (value) => mutate("修改规则…", "/api/v1/routing/rules", "PATCH", {
+    group, index, expected: rule, rule: value,
+  }), { copy: "保存前会核对规则是否已被其他窗口修改；无效规则不会留在配置里。" });
+}
 function ruleEditor(group) {
   const body = dialog(group.name + " · 规则"),
     rules = group.rules || [];
@@ -1404,12 +1886,23 @@ function ruleEditor(group) {
   if (!rules.length) body.append(element("p", "empty-note", "尚无规则"));
   rules.forEach((rule, index) => {
     const row = element("div", "rule-line");
-    row.append(
-      element(
-        "span",
-        "",
-        `${index + 1}. ${rule.type} · ${rule.value} → ${rule.action}`,
-      ),
+    const actions = element("div", "rule-line-actions");
+    actions.append(
+      button("编辑", () => editRule(group.name, index + 1, rule), "text-button"),
+    );
+    if (index > 0) actions.append(button("↑", async () => {
+      const applied = await perform("调整规则顺序…", () => api("/api/v1/routing/rules/move", "POST", {
+        group: group.name, from: index + 1, to: index, expected: rule,
+      }), { success: "规则已上移" });
+      if (applied) closeDialog();
+    }, "text-button"));
+    if (index < rules.length - 1) actions.append(button("↓", async () => {
+      const applied = await perform("调整规则顺序…", () => api("/api/v1/routing/rules/move", "POST", {
+        group: group.name, from: index + 1, to: index + 2, expected: rule,
+      }), { success: "规则已下移" });
+      if (applied) closeDialog();
+    }, "text-button"));
+    actions.append(
       button(
         "删除",
         () =>
@@ -1420,7 +1913,7 @@ function ruleEditor(group) {
               perform("删除规则…", () =>
                 api(
                   `/api/v1/routing/rules?group=${encodeURIComponent(group.name)}&index=${index + 1}`,
-                  "DELETE",
+                  "DELETE", { expected: rule },
                 ),
               ),
             "删除",
@@ -1428,6 +1921,14 @@ function ruleEditor(group) {
           ),
         "text-button",
       ),
+    );
+    row.append(
+      element(
+        "span",
+        "",
+        `${index + 1}. ${rule.type} · ${rule.value} → ${rule.action}`,
+      ),
+      actions,
     );
     body.append(row);
   });
@@ -1498,11 +1999,13 @@ function applyTheme(value) {
   $("theme").value = value;
 }
 function bind() {
-  $("currentNode").onclick = () => {
-    $("nodeSearch").value = state.overview?.core?.currentNode || "";
-    renderNodes();
-    $("nodeSearch").focus();
-  };
+  $("editorBack").onclick = () => leaveSubscriptionEditor();
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && state.editor && !$("dialog").open) {
+      event.preventDefault();
+      leaveSubscriptionEditor();
+    }
+  });
   for (const section of ["Subscriptions", "Routing"])
     $("config" + section).onclick = () => {
       for (const name of ["Subscriptions", "Routing"]) {
@@ -1578,34 +2081,8 @@ function bind() {
         success: "状态已刷新",
       },
     );
-  $("refreshLogs").onclick = () =>
-    perform(
-      "读取日志…",
-      async () => {
-        $("logs").textContent =
-          ((await api("/api/v1/logs?limit=200")) || []).join("\n") ||
-          "暂无内核日志";
-      },
-      { refresh: false, success: "" },
-    );
-  $("doctor").onclick = () =>
-    perform(
-      "正在进行环境诊断…",
-      async () => {
-        const items = await api("/api/v1/doctor");
-        $("doctorResults").replaceChildren();
-        for (const item of items || [])
-          $("doctorResults").append(
-            record(
-              item.name,
-              item.message,
-              item.status === "ok" ? "正常" : "需关注",
-              item.status === "ok",
-            ),
-          );
-      },
-      { refresh: false, success: "诊断完成" },
-    );
+  $("refreshLogs").onclick = () => void loadLogs();
+  $("doctor").onclick = () => void loadDoctor();
   $("addSubGroup").onclick = () =>
     formDialog(
       "新建订阅分组",
@@ -1631,8 +2108,11 @@ function bind() {
         mutate("创建配置…", "/api/v1/routing/profiles", "POST", {
           ...v,
           groups: [],
-        }),
+      }),
     );
+  $("restoreRouting").onclick = () =>
+    confirm("恢复内置路由方案", "只补齐缺失的内置方案和规则组，不覆盖你现有的自定义规则。", () =>
+      perform("恢复内置路由…", () => api("/api/v1/routing/restore", "POST", {})), "恢复");
   $("addRuleGroup").onclick = () =>
     formDialog(
       "新建规则组",
@@ -1728,6 +2208,20 @@ function bind() {
         );
       },
       { success: "导入流程已完成" },
+    );
+  $("coreUse").onclick = () =>
+    formDialog(
+      "切换内核版本",
+      [{ name: "reference", label: "版本", options: state.versions.filter((item) => !item.active).map((item) => [item.version, item.version]) }],
+      ({ reference }) => mutate("切换内核版本…", "/api/v1/core/use", "POST", { reference }),
+      { copy: "切换后若内核正在运行，将按后台规则重启。当前版本不可再次选择。", submitLabel: "切换" },
+    );
+  $("coreDelete").onclick = () =>
+    formDialog(
+      "删除本地内核版本",
+      [{ name: "reference", label: "版本", options: state.versions.filter((item) => !item.active).map((item) => [item.version, item.version]) }],
+      ({ reference }) => mutate("删除内核版本…", `/api/v1/core/installations?reference=${encodeURIComponent(reference)}`, "DELETE"),
+      { copy: "仅删除所选非活动版本的本地文件，不影响当前运行的内核。", submitLabel: "删除版本" },
     );
   for (const [id, action] of [
     ["coreStart", "start"],
@@ -1883,10 +2377,19 @@ setInterval(async () => {
       return;
     }
     await refreshResources(state.busy ? ["overview"] : ["overview", "nodes"]);
+    if (state.tab === "data" && !state.doctorLoaded) void loadDoctor();
   } catch (error) {
     message(error.message, true);
   } finally {
     state.refreshing = false;
   }
 }, 5000);
+setInterval(() => {
+  if (!document.hidden && state.tab === "data") void loadLogs();
+}, 1000);
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden || state.tab !== "data") return;
+  void loadLogs();
+  if (!state.doctorLoaded) void loadDoctor();
+});
 bootstrap().catch((error) => message(error.message, true));

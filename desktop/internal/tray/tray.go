@@ -21,12 +21,14 @@ const (
 	OpenWeb
 	QuitKeep
 	QuitDisconnect
+	EnableTUN
+	DisableTUN
 )
 
 // View 是脱敏的、已派生的托盘视图，联网通过与仅接入使用不同颜色。
 type View struct {
-	Title, Node, Tip, Tone           string
-	Connect, Disconnect, Check, Busy bool
+	Title, Node, Tip, Tone                                     string
+	Connect, Disconnect, Check, TUNEnabled, TUNCanChange, Busy bool
 }
 
 // Item 同时供三个平台生成菜单，避免退出名称与可用条件漂移。
@@ -49,14 +51,22 @@ type Driver interface {
 	Close()
 }
 
-// Menu 描述固定功能，状态条和节点条永远不能被点击执行操作。
+// Menu 仅显示一个代理开关，避免重开桌面时出现相互矛盾的开启/断开项。
 func Menu(v View) []Item {
+	connection := Item{Action: Connect, Label: "开启代理", Enabled: v.Connect && !v.Busy}
+	if v.Disconnect {
+		connection = Item{Action: Disconnect, Label: "关闭代理", Enabled: !v.Busy}
+	}
+	tun := Item{Action: EnableTUN, Label: "开启 TUN 模式", Enabled: v.TUNCanChange && !v.Busy}
+	if v.TUNEnabled {
+		tun = Item{Action: DisableTUN, Label: "关闭 TUN 模式", Enabled: v.TUNCanChange && !v.Busy}
+	}
 	return []Item{
 		{Action: Show, Label: "显示主窗口", Enabled: true},
 		{Label: "状态：" + v.Title}, {Label: "节点：" + Clean(v.Node, 64)},
 		{Separator: true},
-		{Action: Connect, Label: "开启代理", Enabled: v.Connect && !v.Busy},
-		{Action: Disconnect, Label: "断开并恢复系统代理", Enabled: v.Disconnect && !v.Busy},
+		connection,
+		tun,
 		{Action: Check, Label: "检测连通性", Enabled: v.Check && !v.Busy},
 		{Action: OpenWeb, Label: "打开 Web 控制台", Enabled: true},
 		{Separator: true},

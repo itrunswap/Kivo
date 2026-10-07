@@ -13,7 +13,14 @@ import (
 // routeCommand 管理路由配置、可复用规则组及组内有序规则。
 func (s *Shell) routeCommand(ctx context.Context, args []string) error {
 	if len(args) < 2 {
-		return errors.New("用法：/route profile list|use|create，/route group list|create，/route rule list|add|remove")
+		if len(args) == 1 && args[0] == "restore" {
+			if err := s.client.RestoreRouteDefaults(ctx); err != nil {
+				return err
+			}
+			fmt.Fprintln(s.out, s.paint(green, "✓ 缺失的内置路由方案和规则组已恢复"))
+			return nil
+		}
+		return errors.New("用法：/route profile list|use|create，/route group list|create，/route rule list|add|edit|move|remove")
 	}
 	switch args[0] {
 	case "profile":
@@ -135,7 +142,7 @@ func (s *Shell) routeGroupCommand(ctx context.Context, args []string) error {
 
 func (s *Shell) routeRuleCommand(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return errors.New("用法：/route rule list|add|remove")
+		return errors.New("用法：/route rule list|add|edit|move|remove")
 	}
 	switch args[0] {
 	case "list":
@@ -175,14 +182,73 @@ func (s *Shell) routeRuleCommand(ctx context.Context, args []string) error {
 		if err != nil {
 			return errors.New("规则序号必须是数字")
 		}
-		if err := s.client.RemoveRouteRule(ctx, args[1], index); err != nil {
+		rule, err := s.routeRuleAt(ctx, args[1], index)
+		if err != nil {
+			return err
+		}
+		if err := s.client.RemoveRouteRuleChecked(ctx, args[1], index, rule); err != nil {
 			return err
 		}
 		fmt.Fprintln(s.out, s.paint(green, "✓ 路由规则已删除并应用"))
 		return nil
+	case "edit":
+		if len(args) < 6 {
+			return errors.New("用法：/route rule edit <规则组> <序号> <proxy|direct|reject> <类型> <值>")
+		}
+		index, err := strconv.Atoi(args[2])
+		if err != nil {
+			return errors.New("规则序号必须是数字")
+		}
+		old, err := s.routeRuleAt(ctx, args[1], index)
+		if err != nil {
+			return err
+		}
+		rule := config.RouteRule{Action: args[3], Type: args[4], Value: strings.Join(args[5:], " ")}
+		if err := s.client.UpdateRouteRule(ctx, args[1], index, old, rule); err != nil {
+			return err
+		}
+		fmt.Fprintln(s.out, s.paint(green, "✓ 路由规则已修改并应用"))
+		return nil
+	case "move":
+		if len(args) != 4 {
+			return errors.New("用法：/route rule move <规则组> <原序号> <目标序号>")
+		}
+		from, err := strconv.Atoi(args[2])
+		if err != nil {
+			return errors.New("原序号必须是数字")
+		}
+		to, err := strconv.Atoi(args[3])
+		if err != nil {
+			return errors.New("目标序号必须是数字")
+		}
+		old, err := s.routeRuleAt(ctx, args[1], from)
+		if err != nil {
+			return err
+		}
+		if err := s.client.MoveRouteRule(ctx, args[1], from, to, old); err != nil {
+			return err
+		}
+		fmt.Fprintln(s.out, s.paint(green, "✓ 路由规则顺序已调整并应用"))
+		return nil
 	default:
-		return errors.New("用法：/route rule list|add|remove")
+		return errors.New("用法：/route rule list|add|edit|move|remove")
 	}
+}
+
+func (s *Shell) routeRuleAt(ctx context.Context, groupName string, index int) (config.RouteRule, error) {
+	routing, err := s.client.Routing(ctx)
+	if err != nil {
+		return config.RouteRule{}, err
+	}
+	for _, group := range routing.RuleGroups {
+		if strings.EqualFold(group.Name, groupName) {
+			if index < 1 || index > len(group.Rules) {
+				return config.RouteRule{}, fmt.Errorf("规则序号须在 1-%d 之间", len(group.Rules))
+			}
+			return group.Rules[index-1], nil
+		}
+	}
+	return config.RouteRule{}, fmt.Errorf("规则组 %s 不存在", groupName)
 }
 
 func (s *Shell) portCommand(ctx context.Context, args []string) error {

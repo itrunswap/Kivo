@@ -110,6 +110,7 @@ const routing = {
 };
 function snapshot() {
   return {
+    subscriptionEditorVersion: 1,
     core: {
       name: "Mihomo",
       state: running ? "running" : "stopped",
@@ -183,6 +184,7 @@ function api(method, uri, input) {
     if (method === "POST")
       subs.push({
         ...input,
+        name: input.name || new URL(input.url).hostname,
         index: subs.length + 1,
         enabled: true,
         url: "https://example.com/redacted",
@@ -194,7 +196,14 @@ function api(method, uri, input) {
     }
     if (method === "DELETE")
       subs = subs.filter((s) => s.name !== url.searchParams.get("name"));
-    return subs;
+    return subs.map((s) => ({
+      ...s,
+      revision: "preview-" + s.index,
+      downloadAuthType: s.downloadAuth?.type || "none",
+      decryptionType: s.decryption?.type || "none",
+      downloadAuth: undefined,
+      decryption: undefined,
+    }));
   }
   if (
     p === "/api/v1/subscriptions/update" ||

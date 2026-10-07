@@ -231,6 +231,8 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		writeData(w, http.StatusOK, s.service.SubscriptionGroups())
 	case r.URL.Path == "/api/v1/subscription-groups" && r.Method == http.MethodPost:
 		s.handleSubscriptionGroup(w, r, "create")
+	case r.URL.Path == "/api/v1/subscription-groups" && r.Method == http.MethodPatch:
+		s.handleSubscriptionGroup(w, r, "rename")
 	case r.URL.Path == "/api/v1/subscription-groups" && r.Method == http.MethodDelete:
 		if err := s.service.RemoveSubscriptionGroup(r.Context(), r.URL.Query().Get("name")); err != nil {
 			writeAppError(w, err)
@@ -240,6 +242,12 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 	case r.URL.Path == "/api/v1/subscription-groups/action" && r.Method == http.MethodPost:
 		s.handleSubscriptionGroup(w, r, "action")
 	case r.URL.Path == "/api/v1/routing" && r.Method == http.MethodGet:
+		writeData(w, http.StatusOK, s.service.Routing())
+	case r.URL.Path == "/api/v1/routing/restore" && r.Method == http.MethodPost:
+		if err := s.service.RestoreRouteDefaults(r.Context()); err != nil {
+			writeAppError(w, err)
+			return
+		}
 		writeData(w, http.StatusOK, s.service.Routing())
 	case r.URL.Path == "/api/v1/routing/profiles/use" && r.Method == http.MethodPost:
 		s.handleRouting(w, r, "use-profile")
@@ -263,9 +271,24 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		writeData(w, http.StatusOK, map[string]bool{"removed": true})
 	case r.URL.Path == "/api/v1/routing/rules" && r.Method == http.MethodPost:
 		s.handleRouting(w, r, "add-rule")
+	case r.URL.Path == "/api/v1/routing/rules" && r.Method == http.MethodPatch:
+		s.handleRouting(w, r, "edit-rule")
+	case r.URL.Path == "/api/v1/routing/rules/move" && r.Method == http.MethodPost:
+		s.handleRouting(w, r, "move-rule")
 	case r.URL.Path == "/api/v1/routing/rules" && r.Method == http.MethodDelete:
 		index, _ := strconv.Atoi(r.URL.Query().Get("index"))
-		if err := s.service.RemoveRouteRule(r.Context(), r.URL.Query().Get("group"), index); err != nil {
+		var expected *config.RouteRule
+		if r.ContentLength != 0 {
+			var input struct {
+				Expected config.RouteRule `json:"expected"`
+			}
+			if err := decodeJSON(r, &input); err != nil {
+				writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+				return
+			}
+			expected = &input.Expected
+		}
+		if err := s.service.RemoveRouteRuleChecked(r.Context(), r.URL.Query().Get("group"), index, expected); err != nil {
 			writeAppError(w, err)
 			return
 		}
@@ -424,6 +447,11 @@ func (s *Server) handleAddSubscription(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 	if err := s.service.AddSubscription(ctx, input); err != nil {
+		var saved *app.SubscriptionSavedError
+		if errors.As(err, &saved) {
+			writeData(w, http.StatusCreated, map[string]any{"saved": true, "warning": true, "message": saved.Error()})
+			return
+		}
 		writeAppError(w, err)
 		return
 	}
@@ -439,6 +467,11 @@ func (s *Server) handlePatchSubscription(w http.ResponseWriter, r *http.Request)
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 	if err := s.service.PatchSubscription(ctx, input); err != nil {
+		var saved *app.SubscriptionSavedError
+		if errors.As(err, &saved) {
+			writeData(w, http.StatusOK, map[string]any{"saved": true, "warning": true, "message": saved.Error()})
+			return
+		}
 		writeAppError(w, err)
 		return
 	}
@@ -491,6 +524,8 @@ func (s *Server) handleSubscriptionGroup(w http.ResponseWriter, r *http.Request,
 	var err error
 	if operation == "create" {
 		err = s.service.CreateSubscriptionGroup(input["name"])
+	} else if operation == "rename" {
+		err = s.service.RenameSubscriptionGroup(r.Context(), input["name"], input["newName"])
 	} else {
 		switch input["action"] {
 		case "use":
@@ -557,6 +592,30 @@ func (s *Server) handleRouting(w http.ResponseWriter, r *http.Request, operation
 			return
 		}
 		err = s.service.AddRouteRule(ctx, input.Group, input.Rule)
+	case "edit-rule":
+		var input struct {
+			Group    string           `json:"group"`
+			Index    int              `json:"index"`
+			Expected config.RouteRule `json:"expected"`
+			Rule     config.RouteRule `json:"rule"`
+		}
+		if decodeErr := decodeJSON(r, &input); decodeErr != nil {
+			writeError(w, http.StatusBadRequest, "invalid_request", decodeErr.Error())
+			return
+		}
+		err = s.service.UpdateRouteRule(ctx, input.Group, input.Index, input.Expected, input.Rule)
+	case "move-rule":
+		var input struct {
+			Group    string           `json:"group"`
+			From     int              `json:"from"`
+			To       int              `json:"to"`
+			Expected config.RouteRule `json:"expected"`
+		}
+		if decodeErr := decodeJSON(r, &input); decodeErr != nil {
+			writeError(w, http.StatusBadRequest, "invalid_request", decodeErr.Error())
+			return
+		}
+		err = s.service.MoveRouteRule(ctx, input.Group, input.From, input.To, input.Expected)
 	}
 	if err != nil {
 		writeAppError(w, err)

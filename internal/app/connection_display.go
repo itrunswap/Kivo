@@ -16,9 +16,10 @@ type ConnectionDisplay struct {
 // DisplayConnection 只解释已有证据，不触发外网检测；时间由调用方注入以便测试。
 func DisplayConnection(o Overview, now time.Time) ConnectionDisplay {
 	running, attached := o.Core.State == "running", o.SystemProxy.State == "this_app"
-	v := ConnectionDisplay{Title: "未连接", Detail: "系统代理未接入", Tone: "idle", Check: "尚未检测", On: running && attached && o.ProxyPortListening}
+	v := ConnectionDisplay{Title: "未启用", Detail: "尚未接入系统代理，打开开关开始连接", Tone: "idle", Check: "尚未检测", On: running && attached && o.ProxyPortListening}
 	if running {
 		v.Title = "仅内核运行"
+		v.Detail = "系统代理未启用，浏览器不会因此自动走代理"
 	}
 	if o.SystemProxy.State == "other" {
 		v.Detail = "系统代理由其他程序配置"
@@ -30,7 +31,7 @@ func DisplayConnection(o Overview, now time.Time) ConnectionDisplay {
 		v.Detail = "系统代理已接入"
 	}
 	if v.On {
-		v.Title, v.Tone = "已连接 · 未检测", "active"
+		v.Title, v.Tone = "已启用 · 未检测", "active"
 	}
 	if attached && !v.On {
 		v.Title, v.Tone, v.Detail = "代理入口异常", "error", "系统代理指向未就绪的入口，请断开或恢复"
@@ -67,7 +68,8 @@ func DisplayConnection(o Overview, now time.Time) ConnectionDisplay {
 				if node == "ok" {
 					v.Check = "检测通过"
 					if v.On {
-						v.Title, v.Tone = "已连接 · 检测通过", "good"
+						v.Title, v.Tone = "已启用 · 检测通过", "good"
+						v.Detail = "系统代理已接入 · 指定检测目标可达"
 					}
 				}
 			case "partial":

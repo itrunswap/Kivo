@@ -51,18 +51,19 @@ func (s *Service) ProxySetup() platform.ProxyGuide {
 
 // Overview 是控制台首页需要的聚合数据。
 type Overview struct {
-	Display            ConnectionDisplay          `json:"display"`
-	Connection         ConnectionSummary          `json:"connection"`
-	Connectivity       *ConnectivityReport        `json:"connectivity,omitempty"`
-	Core               core.Status                `json:"core"`
-	SubscriptionCount  int                        `json:"subscriptionCount"`
-	EnabledCount       int                        `json:"enabledCount"`
-	Platform           string                     `json:"platform"`
-	Architecture       string                     `json:"architecture"`
-	WebAddress         string                     `json:"webAddress"`
-	TUNEnabled         bool                       `json:"tunEnabled"`
-	ProxyPortListening bool                       `json:"proxyPortListening"`
-	SystemProxy        platform.SystemProxyStatus `json:"systemProxy"`
+	SubscriptionEditorVersion int                        `json:"subscriptionEditorVersion"`
+	Display                   ConnectionDisplay          `json:"display"`
+	Connection                ConnectionSummary          `json:"connection"`
+	Connectivity              *ConnectivityReport        `json:"connectivity,omitempty"`
+	Core                      core.Status                `json:"core"`
+	SubscriptionCount         int                        `json:"subscriptionCount"`
+	EnabledCount              int                        `json:"enabledCount"`
+	Platform                  string                     `json:"platform"`
+	Architecture              string                     `json:"architecture"`
+	WebAddress                string                     `json:"webAddress"`
+	TUNEnabled                bool                       `json:"tunEnabled"`
+	ProxyPortListening        bool                       `json:"proxyPortListening"`
+	SystemProxy               platform.SystemProxyStatus `json:"systemProxy"`
 }
 
 // Overview 返回首页状态。
@@ -85,7 +86,8 @@ func (s *Service) Overview(ctx context.Context) Overview {
 		}
 	}
 	overview := Overview{
-		Core: status, SubscriptionCount: len(cfg.Subscriptions), EnabledCount: enabled,
+		SubscriptionEditorVersion: 1,
+		Core:                      status, SubscriptionCount: len(cfg.Subscriptions), EnabledCount: enabled,
 		Platform: runtime.GOOS, Architecture: runtime.GOARCH, WebAddress: cfg.Web.Listen,
 		TUNEnabled:         cfg.Mihomo.TUNEnabled,
 		ProxyPortListening: listening, SystemProxy: s.SystemProxyStatus(ctx),
@@ -98,32 +100,39 @@ func (s *Service) Overview(ctx context.Context) Overview {
 
 // PublicSubscription 是移除敏感凭据后的订阅信息。
 type PublicSubscription struct {
-	Index            int    `json:"index"`
-	Name             string `json:"name"`
-	URL              string `json:"url"`
-	AuthType         string `json:"authType"`
-	UpdateVia        string `json:"updateVia"`
-	UpdateInterval   int    `json:"updateInterval"`
-	HealthInterval   int    `json:"healthInterval"`
-	HealthCheckURL   string `json:"healthCheckURL"`
-	Enabled          bool   `json:"enabled"`
-	Group            string `json:"group"`
-	AdditionalPrefix string `json:"additionalPrefix,omitempty"`
+	Revision         string                     `json:"revision"`
+	DownloadAuthType string                     `json:"downloadAuthType"`
+	DecryptionType   string                     `json:"decryptionType"`
+	Options          config.SubscriptionOptions `json:"options"`
+	Index            int                        `json:"index"`
+	Name             string                     `json:"name"`
+	URL              string                     `json:"url"`
+	AuthType         string                     `json:"authType"`
+	UpdateVia        string                     `json:"updateVia"`
+	UpdateInterval   int                        `json:"updateInterval"`
+	HealthInterval   int                        `json:"healthInterval"`
+	HealthCheckURL   string                     `json:"healthCheckURL"`
+	Enabled          bool                       `json:"enabled"`
+	Group            string                     `json:"group"`
+	AdditionalPrefix string                     `json:"additionalPrefix,omitempty"`
 }
 
 // SubscriptionInput 是创建订阅的输入模型。
 type SubscriptionInput struct {
-	Name             string `json:"name"`
-	URL              string `json:"url"`
-	AuthType         string `json:"authType"`
-	Username         string `json:"username,omitempty"`
-	Secret           string `json:"secret,omitempty"`
-	UpdateVia        string `json:"updateVia,omitempty"`
-	UpdateInterval   int    `json:"updateInterval"`
-	HealthInterval   int    `json:"healthInterval"`
-	HealthCheckURL   string `json:"healthCheckURL"`
-	AdditionalPrefix string `json:"additionalPrefix,omitempty"`
-	Group            string `json:"group,omitempty"`
+	DownloadAuth     *config.SubscriptionAuth       `json:"downloadAuth,omitempty"`
+	Decryption       *config.SubscriptionDecryption `json:"decryption,omitempty"`
+	Options          config.SubscriptionOptions     `json:"options,omitempty"`
+	Name             string                         `json:"name"`
+	URL              string                         `json:"url"`
+	AuthType         string                         `json:"authType"`
+	Username         string                         `json:"username,omitempty"`
+	Secret           string                         `json:"secret,omitempty"`
+	UpdateVia        string                         `json:"updateVia,omitempty"`
+	UpdateInterval   int                            `json:"updateInterval"`
+	HealthInterval   int                            `json:"healthInterval"`
+	HealthCheckURL   string                         `json:"healthCheckURL"`
+	AdditionalPrefix string                         `json:"additionalPrefix,omitempty"`
+	Group            string                         `json:"group,omitempty"`
 }
 
 // ListSubscriptions 返回脱敏订阅清单。
@@ -131,8 +140,14 @@ func (s *Service) ListSubscriptions() []PublicSubscription {
 	cfg := s.store.Snapshot()
 	result := make([]PublicSubscription, 0, len(cfg.Subscriptions))
 	for index, sub := range cfg.Subscriptions {
+		auth, decrypt := sub.Credentials()
+		legacyType := auth.Type
+		if legacyType == "none" && decrypt.Type != "none" {
+			legacyType = decrypt.Type
+		}
 		result = append(result, PublicSubscription{
-			Index: index + 1, Name: sub.Name, URL: redactURL(sub.URL), AuthType: defaultString(sub.Auth.Type, "none"),
+			Revision: sub.Revision(), DownloadAuthType: auth.Type, DecryptionType: decrypt.Type, Options: sub.Options,
+			Index: index + 1, Name: sub.Name, URL: redactURL(sub.URL), AuthType: legacyType,
 			UpdateVia:      defaultString(sub.UpdateVia, "direct"),
 			UpdateInterval: sub.UpdateInterval, HealthInterval: sub.HealthInterval,
 			HealthCheckURL: sub.HealthCheckURL, Enabled: sub.Enabled, Group: sub.Group,
@@ -174,6 +189,22 @@ func (s *Service) AddSubscription(ctx context.Context, input SubscriptionInput) 
 	if authType != "none" && strings.TrimSpace(input.Secret) == "" {
 		return errors.New("所选认证方式需要密码或 Token")
 	}
+	auth := config.SubscriptionAuth{Type: authType, Username: input.Username, Secret: input.Secret}
+	decrypt := config.SubscriptionDecryption{}
+	if input.DownloadAuth != nil || input.Decryption != nil {
+		if authType != "none" || input.Secret != "" || input.Username != "" {
+			return errors.New("不能同时提交旧版认证字段和分层凭据")
+		}
+		if input.DownloadAuth != nil {
+			auth = *input.DownloadAuth
+		}
+		if input.Decryption != nil {
+			decrypt = *input.Decryption
+		}
+		if err := normalizeSubscriptionCredentials(&auth, &decrypt); err != nil {
+			return err
+		}
+	}
 	input.UpdateVia = strings.ToLower(strings.TrimSpace(input.UpdateVia))
 	if input.UpdateVia == "" {
 		input.UpdateVia = "direct"
@@ -183,6 +214,9 @@ func (s *Service) AddSubscription(ctx context.Context, input SubscriptionInput) 
 	}
 	if input.UpdateInterval <= 0 {
 		input.UpdateInterval = 3600
+	}
+	if input.UpdateInterval < 60 || input.UpdateInterval > 604800 {
+		return errors.New("更新周期须在 60–604800 秒之间")
 	}
 	if input.HealthInterval <= 0 {
 		input.HealthInterval = 300
@@ -226,7 +260,7 @@ func (s *Service) AddSubscription(ctx context.Context, input SubscriptionInput) 
 		}
 		cfg.Subscriptions = append(cfg.Subscriptions, config.Subscription{
 			Name: input.Name, URL: input.URL,
-			Auth:           config.SubscriptionAuth{Type: authType, Username: input.Username, Secret: input.Secret},
+			Auth: auth, Decryption: decrypt, Options: input.Options,
 			UpdateVia:      input.UpdateVia,
 			UpdateInterval: input.UpdateInterval, HealthInterval: input.HealthInterval,
 			HealthCheckURL: input.HealthCheckURL, Enabled: true, Group: input.Group,
@@ -236,7 +270,7 @@ func (s *Service) AddSubscription(ctx context.Context, input SubscriptionInput) 
 	}); err != nil {
 		return err
 	}
-	return s.reloadIfRunning(ctx)
+	return s.reloadSavedSubscription(ctx)
 }
 
 // RemoveSubscription 删除订阅并重载内核。
@@ -350,6 +384,19 @@ func (s *Service) SetMode(ctx context.Context, mode string) error {
 		return errors.New("内核或订阅操作正在执行")
 	}
 	defer s.subscriptionAction.Unlock()
+	// 先确认目标预设存在，不能在保存失败后才发现内核模式已经改变。
+	if mode == "global" || mode == "direct" || mode == "rule" {
+		cfg := s.store.Snapshot()
+		target := mode
+		if mode == "rule" && cfg.Routing.ActiveProfile != "global" && cfg.Routing.ActiveProfile != "direct" {
+			target = cfg.Routing.ActiveProfile
+		}
+		if !slices.ContainsFunc(cfg.Routing.Profiles, func(profile config.RouteProfile) bool {
+			return strings.EqualFold(profile.Name, target)
+		}) {
+			return fmt.Errorf("路由方案 %s 不存在，请先恢复内置方案", target)
+		}
+	}
 	if err := s.core.SetMode(ctx, mode); err != nil {
 		return err
 	}

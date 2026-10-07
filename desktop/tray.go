@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"runtime"
 	"time"
 
 	"github.com/itrunswap/Kivo/desktop/internal/tray"
@@ -12,18 +13,26 @@ import (
 	wruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
-// trayView 是纯状态派生，不根据按钮偏好猜测已连接；检测结果过期后立即降级。
+// trayView 只用当前系统接管与入口状态决定托盘开关；联网检测结果留在状态页。
 func trayView(o app.Overview, online, busy bool, now time.Time) tray.View {
-	v := tray.View{Title: "后台未连接", Node: "未确认", Tone: "error", Busy: busy}
+	v := tray.View{Title: "状态暂不可用", Node: "未确认", Tone: "error", Busy: busy}
 	if !online {
-		v.Tip = "Kivo · 后台未连接（状态未知）"
+		v.Tip = "Kivo · 状态暂不可用"
 		return v
 	}
 	display := app.DisplayConnection(o, now)
-	v.Title, v.Tone = display.Title, display.Tone
+	v.Title, v.Tone = "未启用", "idle"
+	if display.On {
+		v.Title, v.Tone = "已启用", "active"
+	} else if o.SystemProxy.State == "this_app" {
+		v.Tone = "error" // 已接管但入口异常，仍需提供断开操作。
+	}
 	v.Node = tray.Clean(o.Core.CurrentNode, 64)
 	v.Connect, v.Disconnect = display.CanConnect, display.CanDisconnect
 	v.Check = o.Core.State == "running" && o.ProxyPortListening
+	v.TUNEnabled = o.TUNEnabled
+	// 停止时只允许关闭已配置的 TUN；开启必须有运行中的内核，否则菜单会误导为已接管网络。
+	v.TUNCanChange = (o.Core.State == "running" || o.TUNEnabled) && o.Core.State != "starting" && o.Core.State != "stopping" && o.Core.State != "not_installed"
 	v.Tip = "Kivo · " + v.Title + "\n节点：" + v.Node
 	if busy {
 		v.Tip = "Kivo · 操作进行中\n" + v.Title
@@ -245,9 +254,16 @@ func (d *Desktop) trayNotice(message string) {
 
 func (d *Desktop) trayConfirm(title, message string) bool {
 	d.showWindow(options.SecondInstanceData{})
-	answer, err := wruntime.MessageDialog(d.ctx, wruntime.MessageDialogOptions{Type: wruntime.QuestionDialog, Title: title, Message: message, Buttons: []string{"取消", "确认"}, DefaultButton: "取消", CancelButton: "取消"})
-	return err == nil && answer == "确认"
+	defaultButton := "取消"
+	if runtime.GOOS == "windows" {
+		defaultButton = "No" // Windows MessageBox 的取消项叫 No，且自定义 Buttons 被忽略。
+	}
+	answer, err := wruntime.MessageDialog(d.ctx, wruntime.MessageDialogOptions{Type: wruntime.QuestionDialog, Title: title, Message: message, Buttons: []string{"确认", "取消"}, DefaultButton: defaultButton, CancelButton: "取消"})
+	return err == nil && confirmedTrayAnswer(answer)
 }
+
+// Windows MessageBox 忽略自定义按钮文案，只返回 Yes/No；macOS/Linux 返回按钮原文。
+func confirmedTrayAnswer(answer string) bool { return answer == "Yes" || answer == "确认" }
 
 // trayCommand 和页面复用相同 API 与互斥门；错误保留窗口，不强制接管或退出。
 func (d *Desktop) trayCommand(action tray.Action) {
@@ -270,7 +286,7 @@ func (d *Desktop) trayCommand(action tray.Action) {
 		}
 		return
 	}
-	if action != tray.Connect && action != tray.Disconnect && action != tray.Check {
+	if action != tray.Connect && action != tray.Disconnect && action != tray.Check && action != tray.EnableTUN && action != tray.DisableTUN {
 		return
 	}
 	done := d.beginOperation()
@@ -304,13 +320,56 @@ func (d *Desktop) trayCommand(action tray.Action) {
 		err = d.trayOperation("/api/v1/connection/disconnect", "{}")
 	case tray.Check:
 		err = d.trayOperation("/api/v1/connectivity/check", "{}")
-		d.showWindow(options.SecondInstanceData{})
-		wruntime.EventsEmit(d.ctx, "desktop:page", "data")
+	case tray.EnableTUN, tray.DisableTUN:
+		err = d.setTrayTUN(action == tray.EnableTUN)
 	}
 	if err != nil {
-		d.trayNotice(err.Error())
+		if action == tray.Check {
+			// 检测从托盘发起时保持窗口隐藏；错误留在页面，下次打开可查看。
+			wruntime.EventsEmit(d.ctx, "desktop:message", err.Error())
+		} else {
+			d.trayNotice(err.Error())
+		}
 	}
+	d.wakeTray()
 	wruntime.EventsEmit(d.ctx, "desktop:refresh")
+}
+
+// setTrayTUN 读取最新版本后只提交 TUN 字段；菜单快照过期时不反向切换用户的真实意图。
+func (d *Desktop) setTrayTUN(enabled bool) error {
+	read := d.bridge.Request(d.ctx, "GET", "/api/v1/settings", "")
+	if read.Error != "" {
+		return errors.New(read.Error)
+	}
+	if read.Status != 200 {
+		return errors.New("无法读取最新 TUN 设置，请稍后重试")
+	}
+	var settings app.Settings
+	if err := json.Unmarshal(read.Data, &settings); err != nil || settings.Revision == "" {
+		return errors.New("无法确认最新设置版本，请更新后台后重试")
+	}
+	if settings.TUNEnabled == enabled {
+		return nil
+	}
+	if enabled {
+		status := d.bridge.Request(d.ctx, "GET", "/api/v1/overview", "")
+		var overview app.Overview
+		if status.Error != "" || status.Status != 200 || json.Unmarshal(status.Data, &overview) != nil || overview.Core.State != "running" {
+			return errors.New("内核未运行，无法从托盘开启 TUN；请先启动内核")
+		}
+	}
+	body, err := json.Marshal(app.SettingsPatch{Revision: settings.Revision, TUNEnabled: &enabled})
+	if err != nil {
+		return err
+	}
+	result := d.bridge.Request(d.ctx, "PATCH", "/api/v1/settings", string(body))
+	if result.Error != "" {
+		return errors.New(result.Error)
+	}
+	if result.Status != 200 {
+		return errors.New("TUN 设置未能确认，请查看主窗口")
+	}
+	return nil
 }
 
 func (d *Desktop) trayOperation(path, body string) error {

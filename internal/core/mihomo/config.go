@@ -53,17 +53,20 @@ func GenerateConfig(cfg appconfig.Config, runtimeDir string, options ...RuntimeO
 		// 不少 V2Board 类订阅站会根据 User-Agent 决定返回 Clash YAML 还是
 		// Base64 节点链接。显式使用 Clash.Meta 标识，避免返回 Mihomo provider
 		// 无法解析的通用订阅内容。
-		header := map[string]any{"User-Agent": []string{"Clash.Meta"}}
-		switch strings.ToLower(sub.Auth.Type) {
+		auth, decrypt := sub.Credentials()
+		header := map[string]any{"User-Agent": []string{defaultString(sub.Options.UserAgent, "Clash.Meta")}}
+		switch auth.Type {
 		case "basic":
-			encoded := base64.StdEncoding.EncodeToString([]byte(sub.Auth.Username + ":" + sub.Auth.Secret))
+			encoded := base64.StdEncoding.EncodeToString([]byte(auth.Username + ":" + auth.Secret))
 			header["Authorization"] = []string{"Basic " + encoded}
 		case "bearer":
-			header["Authorization"] = []string{"Bearer " + sub.Auth.Secret}
+			header["Authorization"] = []string{"Bearer " + auth.Secret}
 		case "token":
-			header["Authorization"] = []string{"token " + sub.Auth.Secret}
+			header["Authorization"] = []string{"token " + auth.Secret}
+		}
+		switch decrypt.Type {
 		case "age":
-			provider["age-secret-key"] = sub.Auth.Secret
+			provider["age-secret-key"] = decrypt.Secret
 		case "aes":
 			if strings.TrimSpace(cfg.Mihomo.ControllerKey) == "" {
 				return "", fmt.Errorf("AES 订阅 %s 需要非空的 Mihomo Controller 密钥", sub.Name)
@@ -76,11 +79,26 @@ func GenerateConfig(cfg appconfig.Config, runtimeDir string, options ...RuntimeO
 			// AES 的远端下载发生在 Kivo 内部适配器中。本地回环端点必须直连，
 			// 由适配器再根据 UpdateVia 决定远端请求是否进入固定 PROXY 出站的内部入口。
 			provider["proxy"] = "DIRECT"
-			header["X-Kivo-Internal"] = []string{cfg.Mihomo.ControllerKey}
+			header = map[string]any{"X-Kivo-Internal": []string{cfg.Mihomo.ControllerKey}}
 		}
 		provider["header"] = header
+		override := map[string]any{}
 		if sub.AdditionalPrefix != "" {
-			provider["override"] = map[string]any{"additional-prefix": sub.AdditionalPrefix}
+			override["additional-prefix"] = sub.AdditionalPrefix
+		}
+		for key, value := range map[string]string{"udp": sub.Options.UDP, "tfo": sub.Options.TFO, "skip-cert-verify": sub.Options.SkipCertVerify} {
+			if value == "on" || value == "off" {
+				override[key] = value == "on"
+			}
+		}
+		if len(override) > 0 {
+			provider["override"] = override
+		}
+		if sub.Options.Filter != "" {
+			provider["filter"] = sub.Options.Filter
+		}
+		if sub.Options.ExcludeFilter != "" {
+			provider["exclude-filter"] = sub.Options.ExcludeFilter
 		}
 		providers[sub.Name] = provider
 		providerNames = append(providerNames, sub.Name)

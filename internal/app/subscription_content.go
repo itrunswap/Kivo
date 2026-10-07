@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/itrunswap/Kivo/internal/config"
 	"github.com/itrunswap/Kivo/internal/core"
 	"github.com/itrunswap/Kivo/internal/subscription"
 )
@@ -30,12 +31,17 @@ func (s *Service) DecryptedSubscriptionContent(ctx context.Context, name string)
 	}
 	cfg := s.store.Snapshot()
 	var targetURL, password, updateVia string
+	var auth config.SubscriptionAuth
+	var userAgent string
 	for _, item := range cfg.Subscriptions {
 		if strings.EqualFold(item.Name, name) {
-			if !strings.EqualFold(item.Auth.Type, "aes") {
+			var decrypt config.SubscriptionDecryption
+			auth, decrypt = item.Credentials()
+			if decrypt.Type != "aes" {
 				return nil, fmt.Errorf("订阅 %s 不是 AES 加密订阅", item.Name)
 			}
-			targetURL, password, updateVia = item.URL, item.Auth.Secret, item.UpdateVia
+			targetURL, password, updateVia = item.URL, decrypt.Secret, item.UpdateVia
+			userAgent = item.Options.UserAgent
 			break
 		}
 	}
@@ -61,7 +67,15 @@ func (s *Service) DecryptedSubscriptionContent(ctx context.Context, name string)
 	}
 	request.Header.Set("Accept", "*/*")
 	// 与普通 Mihomo provider 保持一致，强制订阅站返回 Clash/Mihomo 格式。
-	request.Header.Set("User-Agent", "Clash.Meta")
+	request.Header.Set("User-Agent", defaultString(userAgent, "Clash.Meta"))
+	switch auth.Type {
+	case "basic":
+		request.SetBasicAuth(auth.Username, auth.Secret)
+	case "bearer":
+		request.Header.Set("Authorization", "Bearer "+auth.Secret)
+	case "token":
+		request.Header.Set("Authorization", "token "+auth.Secret)
+	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	defer transport.CloseIdleConnections()
 	// 直连模式显式忽略 HTTP_PROXY/HTTPS_PROXY，确保命令语义不受外部环境变量影响。
@@ -77,7 +91,19 @@ func (s *Service) DecryptedSubscriptionContent(ctx context.Context, name string)
 		}
 		transport.Proxy = http.ProxyURL(proxyURL)
 	}
-	client := &http.Client{Timeout: 45 * time.Second, Transport: transport}
+	client := &http.Client{Timeout: 45 * time.Second, Transport: transport, CheckRedirect: func(next *http.Request, via []*http.Request) error {
+		if len(via) >= 10 {
+			return errors.New("订阅重定向次数过多")
+		}
+		first := via[0].URL
+		if first.Scheme == "https" && next.URL.Scheme != "https" {
+			return errors.New("拒绝订阅降级到非 HTTPS 地址")
+		}
+		if (auth.Type != "none" || first.User != nil) && (next.URL.Host != first.Host || next.URL.Scheme != first.Scheme) {
+			return errors.New("带认证的订阅不允许跨来源重定向")
+		}
+		return nil
+	}}
 	response, err := client.Do(request)
 	if err != nil {
 		if ctx.Err() != nil {

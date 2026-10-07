@@ -4,7 +4,7 @@
 
 Kivo Desktop 使用 Wails 2（MIT）与 Go WebView2（MIT）及其 Go 依赖。构建时通过 `scripts/desktop-licenses` 收集模块中的原始 LICENSE / NOTICE，保存并随包分发 `desktop/THIRD_PARTY_LICENSES.txt`。Wails 使用系统 WebView；Windows WebView2 Runtime、macOS 系统框架与 Linux GTK / WebKitGTK 运行库分别受各自许可约束，不随本程序重新许可。
 
-桌面应用图标由项目自己的 Go 绘图脚本生成；不使用 Wails 默认图标、Shadowrocket 标识或参考网站品牌。布局参考不表示与参考产品存在合作。Kivo 自身许可证仍需所有者指定。
+桌面应用图标由项目自己的 Go 绘图脚本生成；不使用 Wails 默认图标、Shadowrocket 标识或参考网站品牌。布局参考不表示与参考产品存在合作。Kivo 自身使用 MIT 许可证，见根目录 `LICENSE`。
 
 
 ## LINUX DO Credit 设计基线
@@ -322,7 +322,7 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
 
 项目地址：https://github.com/itrunswap/Kivo
 
-Kivo 自身的开源许可证尚未由项目所有者指定。本文件不是 Kivo 的授权协议，也不会自动将 Kivo 置于下列第三方许可证之下。正式授予使用、修改或再分发权限时，请由所有者补充根目录 `LICENSE`。
+Kivo 自身使用 MIT 许可证，原文见根目录 `LICENSE`。本文件仅用于保留第三方组件的独立许可与版权声明，不会改变第三方组件的授权条件。
 
 ## Mihomo
 

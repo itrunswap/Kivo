@@ -29,7 +29,7 @@ jobs:
       run:
         shell: bash
     env:
-      VERSION: 0.3.2-desktop-preview
+      VERSION: 0.3.6-desktop-preview
       TARGET: darwin/universal
       COMMIT: ${{ github.sha }}
     steps:

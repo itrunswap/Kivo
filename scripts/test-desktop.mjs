@@ -4,6 +4,8 @@ import fs from "node:fs";
 import {
   fresh,
   connectionView,
+  checkTime,
+  homeConnectionTitle,
   groupNodes,
   nodeLatency,
   selectedNode,
@@ -72,6 +74,30 @@ test("过期、未来、标记过期的检测不是联网证据", () => {
   assert.equal(
     fresh({ ...report, checkedAt: new Date(now + 20000).toISOString() }, now),
     false,
+  );
+});
+
+test("首页连接标题直接展示节点，检测只显示时间且不复用过期成功状态", () => {
+  const checked = new Date(2026, 9, 7, 10, 9);
+  const at = new Date(2026, 9, 7, 10, 12);
+  const old = { ...report, checkedAt: checked.toISOString() };
+  const active = { ...overview, connectivity: old };
+  assert.equal(fresh(old, at.getTime()), false);
+  assert.equal(
+    homeConnectionTitle(connectionView(active, true, at.getTime()), active),
+    "Hong Kong",
+  );
+  assert.equal(checkTime(old, at.getTime()), "10:09");
+  assert.equal(checkTime(null, at.getTime()), "尚未检测");
+  const off = { ...active, systemProxy: { state: "off", supported: true } };
+  assert.equal(
+    homeConnectionTitle(connectionView(off, true, at.getTime()), off),
+    "未连接",
+  );
+  const direct = { ...active, core: { ...active.core, mode: "direct" } };
+  assert.equal(
+    homeConnectionTitle(connectionView(direct, true, at.getTime()), direct),
+    "直连模式",
   );
 });
 test("节点离线快照与未测速不显示绿色", () => {

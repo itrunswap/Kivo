@@ -153,8 +153,19 @@ test("路由配置的 null 规则组和空规则不使页面中断",()=>{
   h.run('state.routing={activeProfile:"global",profiles:[{name:"global",defaultAction:"proxy",groups:null}],ruleGroups:[{name:"empty",rules:null}]};renderRouting()');
   const cards=h.elements.get("#routeProfiles").children;
   assert.equal(cards.length,1);
-  assert.equal(cards[0].children[1].textContent,"无规则组");
+  assert.match(cards[0].children[1].textContent,/尚未关联规则组/);
   assert.equal(h.elements.get("#routeGroups").children[0].children[0].textContent,"empty · 0 条");
+});
+
+test("分组编辑保护默认分组，其他分组可重命名和启停",()=>{
+  const h=harness(null);
+  h.run('state.subscriptionGroups=[{name:"default",enabled:true},{name:"work",enabled:true}];$("#subscriptionGroupSelect").value="work";renderSubscriptionGroups()');
+  assert.equal(h.elements.get("#toggleSubscriptionGroup").textContent,"禁用此组");
+  assert.equal(h.elements.get("#renameSubscriptionGroup").value,"work");
+  assert.equal(h.elements.get("#saveSubscriptionGroupName").disabled,false);
+  h.run('$("#subscriptionGroupSelect").value="default";updateSubscriptionGroupControls()');
+  assert.equal(h.elements.get("#saveSubscriptionGroupName").disabled,true);
+  assert.equal(h.elements.get("#deleteSubscriptionGroup").disabled,true);
 });
 
 test("自动接入、手动接入、停止和恢复冲突明确区分",()=>{

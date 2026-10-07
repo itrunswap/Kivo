@@ -75,12 +75,13 @@ AGE 私钥和 AES 解密密码均使用隐藏输入，不会出现在命令历�
 ```text
 /sub group list
 /sub group create 工作
+/sub group rename 工作 "工作备用"
 /sub group use 工作
 /sub group enable|disable 工作
 /sub group remove 工作
 ```
 
-`use` 是独占切换，只启用目标分组；`enable/disable` 可组合多个分组。有订阅引用时不能删除分组。
+`use` 是独占切换，只启用目标分组；`enable/disable` 可组合多个分组。`rename` 会一起更新组内订阅的引用；默认分组不能重命名或删除，有订阅引用时不能删除其他分组。
 
 ## 节点与运行参数
 
@@ -100,10 +101,11 @@ AGE 私钥和 AES 解密密码均使用隐藏输入，不会出现在命令历�
 
 ## 路由配置与规则
 
-内置 `global`、`direct`、`rule`、`bypass-cn`、`proxy-only` 和 `bypass-list`。
+内置 `global`、`direct`、`rule`、`bypass-cn`、`proxy-only` 和 `bypass-list`。内置方案及内置规则组不可删除；自定义方案须先切换到其他方案才能删除，仍被方案引用的规则组须先解除关联。旧版本若删掉了内置项，用 `/route restore` 只补齐缺失项，不覆盖自定义规则。
 
 ```text
 /route profile list
+/route restore
 /route profile use <名称>
 /route profile create <名称> --default proxy|direct|reject [--groups 组1,组2]
 /route profile attach|detach <配置> <规则组>
@@ -115,6 +117,8 @@ AGE 私钥和 AES 解密密码均使用隐藏输入，不会出现在命令历�
 
 /route rule list <规则组>
 /route rule add <规则组> <proxy|direct|reject> <类型> <值>
+/route rule edit <规则组> <序号> <proxy|direct|reject> <类型> <值>
+/route rule move <规则组> <原序号> <目标序号>
 /route rule remove <规则组> <序号>
 ```
 
@@ -122,6 +126,8 @@ AGE 私钥和 AES 解密密码均使用隐藏输入，不会出现在命令历�
 `domain-regex`、`ip-cidr`、`ip-cidr6`、`geoip`、`geosite`、`process-name`、
 `process-path`、`dst-port`。规则按配置中的“规则组顺序 → 组内顺序”生成，首条命中后停止，
 最后自动追加配置的默认动作。
+
+编辑、移动和删除规则会先核对原规则；若 Web、桌面或另一个 CLI 已修改列表，会拒绝过期序号，请重新列出规则再操作。运行中应用新路由前先做内核预检；应用失败会恢复旧持久配置，并在错误中说明是否需要手动恢复内核。
 
 例如“只代理 OpenAI，其他直连”：
 

@@ -279,12 +279,12 @@ SOCKS5 代理：127.0.0.1:17890
 | 自动接入 | `/connect [--replace|--adopt] [--no-check]`、`/disconnect` |
 | 系统代理 | `/system-proxy status|on|off|recover`；on 支持 `--replace/--adopt`，recover 支持 `--force` |
 | 订阅 | `/sub add|list|show|edit|enable|disable|move|update|test|remove` |
-| 订阅分组 | `/sub group list|create|use|enable|disable|remove` |
+| 订阅分组 | `/sub group list|create|rename|use|enable|disable|remove` |
 | 节点 | `/node list|test|use` |
 | 模式 | `/mode rule|global|direct` |
 | 路由配置 | `/route profile list|use|create|attach|detach|remove` |
 | 规则组 | `/route group list|create|remove` |
-| 路由规则 | `/route rule list|add|remove` |
+| 路由规则 | `/route rule list|add|edit|move|remove`；`/route restore` 恢复缺失预设 |
 | 网络 | `/port`、`/tun`、`/lan` |
 | 配置 | `/config show|validate|download-proxy|download-retry` |
 | 诊断 | `/doctor`、`/logs [行数]` |
@@ -882,6 +882,15 @@ Clash/Mihomo 格式。
 
 新分组默认启用。
 
+### 重命名分组
+
+```text
+/sub group rename <原名称> <新名称>
+/sub group rename 工作 "工作备用"
+```
+
+组内订阅的引用会一起更新。`default` 是稳定的默认分组，不能重命名。
+
 ### 独占使用一个分组
 
 ```text
@@ -913,7 +922,7 @@ Clash/Mihomo 格式。
 /sub group remove <名称>
 ```
 
-存在订阅引用时不能删除该分组。先用 `/sub move` 移走订阅，或删除相关订阅。
+存在订阅引用时不能删除该分组。先用 `/sub move` 移走订阅，或删除相关订阅；`default` 不能删除。
 
 ---
 
@@ -1005,6 +1014,8 @@ Web 节点页保留本次测速统计，窄屏也能看到延迟与检查状态�
 | `proxy-only` | direct | 指定地址代理 | 只有指定地址走代理，其他直连 |
 | `bypass-list` | proxy | 指定地址直连 | 指定地址直连，其他走代理 |
 
+内置方案和内置规则组不可删除。旧版本如已删除其中某项，执行 `/route restore` 只补齐缺失项，不覆盖已有自定义规则。
+
 ### 12.3 查看和切换路由配置
 
 ```text
@@ -1055,7 +1066,7 @@ Web 节点页保留本次测速统计，窄屏也能看到延迟与检查状态�
 /route profile remove <名称>
 ```
 
-当前活动配置不能删除，必须先切换到另一个配置。
+当前活动配置不能删除，必须先切换到另一个配置；内置方案始终不可删除。正在被引用的规则组须先用 `detach` 解除关联。
 
 ---
 
@@ -1143,7 +1154,16 @@ Web 节点页保留本次测速统计，窄屏也能看到延迟与检查状态�
 /route rule add "工作代理" proxy domain-suffix github.com
 ```
 
-### 13.6 删除规则
+### 13.6 修改与调整顺序
+
+```text
+/route rule edit <规则组> <序号> <proxy|direct|reject> <类型> <值>
+/route rule move <规则组> <原序号> <目标序号>
+```
+
+规则顺序决定优先级。多窗口并发操作时会核对原规则，不会因旧序号误改或误删。
+
+### 13.7 删除规则
 
 ```text
 /route rule remove <规则组> <序号>
@@ -1156,7 +1176,7 @@ Web 节点页保留本次测速统计，窄屏也能看到延迟与检查状态�
 /route rule remove 指定地址代理 2
 ```
 
-### 13.7 常用路由方案
+### 13.8 常用路由方案
 
 只代理 OpenAI，其他全部直连：
 
@@ -1617,6 +1637,7 @@ Authorization: Bearer <Token>
 | POST | `/subscriptions/test` | 健康检查一个订阅或 `all` |
 | GET | `/subscription-groups` | 查看订阅分组 |
 | POST | `/subscription-groups` | 创建订阅分组 |
+| PATCH | `/subscription-groups` | 重命名分组并更新订阅引用 |
 | DELETE | `/subscription-groups?name=<名称>` | 删除订阅分组 |
 | POST | `/subscription-groups/action` | `use`、`enable` 或 `disable` 分组 |
 | GET | `/nodes` | 节点列表 |
@@ -1633,6 +1654,7 @@ Authorization: Bearer <Token>
 | POST | `/core/stop` | 停止 Core |
 | POST | `/core/restart` | 重启 Core |
 | GET | `/routing` | 路由配置和规则组 |
+| POST | `/routing/restore` | 补齐缺失的内置路由方案与规则组 |
 | POST | `/routing/profiles/use` | 切换路由配置 |
 | POST | `/routing/profiles` | 创建路由配置 |
 | PATCH | `/routing/profiles` | 挂载/移除规则组 |
@@ -1640,6 +1662,8 @@ Authorization: Bearer <Token>
 | POST | `/routing/groups` | 创建规则组 |
 | DELETE | `/routing/groups?name=<名称>` | 删除规则组 |
 | POST | `/routing/rules` | 添加规则 |
+| PATCH | `/routing/rules` | 核对原规则后编辑 |
+| POST | `/routing/rules/move` | 核对原规则后调整顺序 |
 | DELETE | `/routing/rules?group=<组>&index=<序号>` | 删除规则 |
 | GET/PATCH | `/settings` | 查询或修改公开运行设置 |
 | GET/PATCH | `/web/security` | 查询鉴权状态或设置/清空 Token |

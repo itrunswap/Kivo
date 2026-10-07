@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/itrunswap/Kivo/internal/config"
@@ -58,6 +59,51 @@ func TestRequestAllowlist(t *testing.T) {
 	for _, tc := range []struct{ method, path string }{{"GET", "/api/v1/overview"}, {"PATCH", "/api/v1/settings"}, {"POST", "/api/v1/subscriptions/update"}, {"DELETE", "/api/v1/subscriptions?name=test"}} {
 		if err := validate(tc.method, tc.path, "{}"); err != nil {
 			t.Fatal(err)
+		}
+	}
+}
+
+// 页面新增操作必须同时通过桌面桥和后台 API；只测 JS 的模拟请求会漏掉白名单漂移。
+func TestDesktopManagementRoutesReachBackend(t *testing.T) {
+	tests := []struct {
+		name, method, path, body string
+	}{
+		{"rename subscription group", "PATCH", "/api/v1/subscription-groups", `{"name":"old","newName":"new"}`},
+		{"restore routing presets", "POST", "/api/v1/routing/restore", `{}`},
+		{"edit route rule", "PATCH", "/api/v1/routing/rules", `{"group":"custom","index":1,"rule":{"type":"domain","value":"example.com","action":"proxy"}}`},
+		{"move route rule", "POST", "/api/v1/routing/rules/move", `{"group":"custom","from":1,"to":2}`},
+		{"delete checked rule", "DELETE", "/api/v1/routing/rules?group=custom&index=1", `{"expected":{"type":"domain","value":"example.com","action":"proxy"}}`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var calls atomic.Int32
+			bridge, _ := testBridge(t, func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				if r.Method != test.method || r.URL.RequestURI() != test.path {
+					t.Errorf("unexpected endpoint: %s %s", r.Method, r.URL.RequestURI())
+				}
+				if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
+					t.Errorf("missing local auth: %q", got)
+				}
+				var body json.RawMessage
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil || !json.Valid(body) {
+					t.Errorf("invalid JSON body: %v", err)
+				}
+				_, _ = w.Write([]byte(`{"data":{"ok":true}}`))
+			})
+			result := bridge.Request(context.Background(), test.method, test.path, test.body)
+			if result.Error != "" || result.Status != http.StatusOK || calls.Load() != 1 {
+				t.Fatalf("desktop action did not reach backend: %+v, calls=%d", result, calls.Load())
+			}
+		})
+	}
+	for _, rejected := range []struct{ method, path string }{
+		{"GET", "/api/v1/routing/restore"},
+		{"DELETE", "/api/v1/routing/rules/move"},
+		{"POST", "/api/v1/subscription-groups/unknown"},
+	} {
+		if err := validate(rejected.method, rejected.path, `{}`); err == nil {
+			t.Fatalf("unexpected desktop capability: %s %s", rejected.method, rejected.path)
 		}
 	}
 }

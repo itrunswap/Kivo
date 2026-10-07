@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/itrunswap/Kivo/internal/config"
 	"github.com/itrunswap/Kivo/internal/core"
 )
 
@@ -51,6 +52,14 @@ func (m *Manager) snapshotPath(name string) (string, error) {
 			sub.Name, sub.URL, sub.Auth.Type, sub.Auth.Username, sub.Auth.Secret, sub.AdditionalPrefix,
 		}
 		data, _ := json.Marshal(identity)
+		// 旧订阅继续命中原缓存；新增分层凭据或筛选覆盖后不能展示旧快照。
+		if sub.Decryption.Type != "" || sub.Options != (config.SubscriptionOptions{}) {
+			extra, _ := json.Marshal(struct {
+				Decryption config.SubscriptionDecryption
+				Options    config.SubscriptionOptions
+			}{sub.Decryption, sub.Options})
+			data = append(data, extra...)
+		}
 		sum := sha256.Sum256(data)
 		return filepath.Join(m.store.Paths().RuntimeDir, "node-snapshots", hex.EncodeToString(sum[:])+".json"), nil
 	}

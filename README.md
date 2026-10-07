@@ -10,13 +10,21 @@ Kivo 使用 Go 开发，通过独立的 Mihomo 内核提供代理能力，负责
 
 ## 下载
 
-### 桌面端开发预览
+### Windows / macOS 一体桌面版
 
 桌面端采用 Go + Wails 2，使用系统 WebView，不附带 Chromium。紧凑单列提供首页、配置、数据、设置四个标签，和 CLI / Web 共用后台与配置。支持连接开关、真实联网状态、订阅及路由管理、节点选择 / 测速、带进度的内核安装和原生文件导入。
 
-Windows 本地桌面包位于 `dist/desktop/v0.3.2/kivo-desktop-windows-amd64.zip`，解压双击 `kivo-desktop.exe`。旧版包保留，不覆盖正在运行的程序。这不是下方已发布 CLI 包；Mac / Linux 使用单独原生构建流水线，完成实机验收再发布。托盘就绪后关闭窗口会驻留，点击托盘恢复、右键打开状态及操作菜单；明确区分“退出桌面（保留代理）”与“断开并退出”。详见[桌面端说明](docs/DESKTOP.md)。
+版本发布流程将提供 Windows 一体安装器/便携 ZIP，以及 macOS Universal PKG/ZIP 测试包。桌面包同时包含 CLI，CLI 内嵌 Web；macOS 包未经 Apple 签名或公证。托盘就绪后关闭窗口会驻留，点击托盘恢复、右键打开状态及操作菜单；明确区分“退出桌面（保留代理）”与“断开并退出”。下载、安装和升级见[安装指南](docs/INSTALL.md)，交互见[桌面端说明](docs/DESKTOP.md)。
 
-### CLI / Web 已发布版本
+| 系统 | 一体包下载 |
+| --- | --- |
+| Windows AMD64 | [安装器](https://github.com/itrunswap/Kivo/releases/latest/download/Kivo-Setup-windows-amd64.exe) · [便携 ZIP](https://github.com/itrunswap/Kivo/releases/latest/download/kivo-desktop-windows-amd64.zip) |
+| Windows ARM64 | [安装器](https://github.com/itrunswap/Kivo/releases/latest/download/Kivo-Setup-windows-arm64.exe) · [便携 ZIP](https://github.com/itrunswap/Kivo/releases/latest/download/kivo-desktop-windows-arm64.zip) |
+| macOS Universal | [未公证测试 PKG](https://github.com/itrunswap/Kivo/releases/latest/download/Kivo-Installer-darwin-universal.pkg) · [便携 ZIP](https://github.com/itrunswap/Kivo/releases/latest/download/kivo-desktop-darwin-universal.zip) |
+
+首次完整发布前，上述链接尚不可用；当前是否已有可下载文件，请以 [Releases 页面](https://github.com/itrunswap/Kivo/releases) 为准。
+
+### CLI / Web 便携版
 
 进入 [GitHub Releases](https://github.com/itrunswap/Kivo/releases) 下载对应平台的压缩包。首次发布完成前，下方“最新版”链接可能暂不可用。
 
@@ -32,6 +40,8 @@ Windows 本地桌面包位于 `dist/desktop/v0.3.2/kivo-desktop-windows-amd64.zi
 | Linux ARM64   | ARM64 设备、服务器            | [kivo-linux-arm64.tar.gz](https://github.com/itrunswap/Kivo/releases/latest/download/kivo-linux-arm64.tar.gz)   |
 
 每包包含短名程序 `kivo.exe` 或 `kivo`、中文 README、完整使用说明书和第三方组件声明。Release 同时提供 `SHA256SUMS`，用于验证**压缩包**完整性。Kivo 包不包含 Mihomo，内核通过命令另行安装。
+
+Windows/macOS 普通用户优先下载上方一体桌面包；Linux 服务器下载本表对应 CLI 包即可获得 Web。各系统的安装命令、校验和源码构建统一见[安装指南](docs/INSTALL.md)。
 
 ### Windows
 
@@ -177,8 +187,8 @@ go build -o bin/kivo ./cmd/kivo
 
 ## 当前边界与许可
 
-目前只接入 Mihomo；代理可用性取决于订阅、节点和网络。Windows 已做真实 CLI / 联网测试，macOS / Linux 完成交叉构建和平台适配测试，**尚不能视为对应系统实机验收**。高级管理并非全部有 Web 按钮；TUN、远程访问、长期稳定性需按实际环境验证。
+目前只接入 Mihomo；代理可用性取决于订阅、节点和网络。Windows 已做真实 CLI / 联网测试，macOS / Linux 完成交叉构建和平台适配测试，**尚不能视为对应系统实机验收**。Web、桌面、CLI 均支持订阅编辑、分组重命名及路由规则编辑／排序；原生内核文件导入等平台专属操作仍以桌面端或 CLI 为主。TUN、远程访问、长期稳定性需按实际环境验证。
 
 已知生命周期限制：`/web restart` 返回后内核可能仍在恢复，立即 `/shutdown` 可能遇到“订阅操作正在执行”；请先 `/status` 等待内核就绪，再执行停止或联网检测。细节见测试报告。
 
-Kivo 自身开源许可证**尚未指定**；源码公开不等于已授予无限制使用或再分发许可，需要项目所有者补充 `LICENSE`。Mihomo 是独立下载的 GPL-3.0 组件，本仓库发行包不捆绑其可执行文件；详见[第三方组件声明](THIRD_PARTY_NOTICES.md)。
+Kivo 自身采用 [MIT 许可证](LICENSE)。Mihomo 是独立下载的 GPL-3.0 组件，本仓库发行包不捆绑其可执行文件；详见[第三方组件声明](THIRD_PARTY_NOTICES.md)。

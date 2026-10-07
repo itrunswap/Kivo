@@ -533,6 +533,45 @@ func (m *Manager) Restart(ctx context.Context) error {
 	return m.start(ctx)
 }
 
+// ValidateConfig 在独立临时目录验证候选配置，不替换正在运行的内核配置。
+// 没有安装内核时仍允许编辑路由，此时由应用层结构校验负责。
+func (m *Manager) ValidateConfig(ctx context.Context, cfg appconfig.Config) error {
+	if cfg.Mihomo.BinaryPath == "" {
+		return nil
+	}
+	if _, err := os.Stat(cfg.Mihomo.BinaryPath); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	m.mu.RLock()
+	if m.providerListen != "" {
+		cfg.Web.Listen = m.providerListen
+	}
+	options := m.options
+	m.mu.RUnlock()
+	dir, err := os.MkdirTemp(m.store.Paths().RuntimeDir, "route-check-")
+	if err != nil {
+		return fmt.Errorf("创建路由预检目录: %w", err)
+	}
+	defer os.RemoveAll(dir)
+	if _, err := GenerateConfig(cfg, dir, options); err != nil {
+		return err
+	}
+	checkCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	command := exec.CommandContext(checkCtx, cfg.Mihomo.BinaryPath, "-t", "-d", dir)
+	platform.ConfigureCoreProcess(command)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		if checkCtx.Err() != nil {
+			return fmt.Errorf("Mihomo 预检超时或取消（配置尚未保存）: %w", checkCtx.Err())
+		}
+		return fmt.Errorf("Mihomo 预检未通过（配置尚未保存）: %s", sanitizeLog(string(output)))
+	}
+	return nil
+}
+
 // Status 获取进程状态，并在运行时补充当前节点。
 func (m *Manager) Status(ctx context.Context) core.Status {
 	m.mu.RLock()

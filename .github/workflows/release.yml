@@ -1,11 +1,9 @@
-name: 发布六平台安装包
+name: 发布 Kivo 安装包与源码
 
 on:
   push:
-    tags:
-      - 'v*'
+    tags: ["v*"]
 
-# 仅版本标签运行本流程，普通推送与 PR 不获取发布权限。
 permissions:
   contents: write
 
@@ -14,12 +12,10 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  release:
+  cli:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 35
     env:
-      GH_TOKEN: ${{ github.token }}
-      GH_REPO: ${{ github.repository }}
       VERSION: ${{ github.ref_name }}
       COMMIT: ${{ github.sha }}
     steps:
@@ -30,48 +26,140 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-          cache-dependency-path: go.mod
-      - name: 验证版本标签
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+      - name: 检查并构建六平台 CLI 与内嵌 Web
         shell: bash
         run: |
-          [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "仅支持 v主版本.次版本.补丁版本 正式标签"; exit 1; }
-          echo "BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
-      - name: 运行发布前检查
-        run: |
+          [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          export BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           test -z "$(gofmt -l cmd internal scripts)"
           go test -race ./...
           go vet ./...
-          node --check internal/server/assets/app.js
           node --test scripts/test-web.mjs
-      - name: 构建并打包六个平台
-        run: |
-          sh ./scripts/build.sh
-          go run ./scripts/package.go -input dist -output dist/releases
+          sh scripts/build.sh
+          go run scripts/package.go -input dist -output dist/releases
           cd dist/releases
           sha256sum --check SHA256SUMS
-      - name: 创建或继续上传草稿版本
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-cli
+          path: dist/releases/kivo-*
+          if-no-files-found: error
+
+  windows:
+    strategy:
+      fail-fast: false
+      matrix:
+        architecture: [amd64, arm64]
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      VERSION: ${{ github.ref_name }}
+      COMMIT: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: desktop/go.mod
+          cache-dependency-path: desktop/go.sum
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+      - name: 安装 NSIS 打包工具
+        shell: pwsh
+        run: choco install nsis --yes --no-progress
+      - name: 构建桌面、CLI、Web 和安装包
+        shell: pwsh
+        run: |
+          $env:BUILD_DATE = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+          ./scripts/build-desktop.ps1 -Version $env:VERSION -Commit $env:COMMIT -BuildDate $env:BUILD_DATE -Architecture '${{ matrix.architecture }}' -OutputDirectory dist/desktop/windows
+          ./scripts/package-windows.ps1 -Architecture '${{ matrix.architecture }}' -OutputDirectory dist/desktop/windows
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-windows-${{ matrix.architecture }}
+          path: |
+            dist/desktop/windows/kivo-desktop-windows-${{ matrix.architecture }}.zip
+            dist/desktop/windows/Kivo-Setup-windows-${{ matrix.architecture }}.exe
+          if-no-files-found: error
+
+  macos:
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      VERSION: ${{ github.ref_name }}
+      TARGET: darwin/universal
+      COMMIT: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: desktop/go.mod
+          cache-dependency-path: desktop/go.sum
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+      - name: 原生构建 Universal 桌面与 CLI
         shell: bash
         run: |
-          # 允许失败后重跑草稿，但不覆盖已经公开的 Release。
+          export BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          sh scripts/build-desktop.sh
+          sh scripts/package-macos.sh
+          cd dist/desktop/macos
+          shasum -a 256 -c SHA256SUMS
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-macos
+          path: |
+            dist/desktop/macos/kivo-desktop-darwin-universal.zip
+            dist/desktop/macos/Kivo-Installer-darwin-universal.pkg
+          if-no-files-found: error
+
+  publish:
+    needs: [cli, windows, macos]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      VERSION: ${{ github.ref_name }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: dist/releases
+      - name: 校验文件并生成统一 SHA256SUMS
+        shell: bash
+        run: |
+          cd dist/releases
+          test "$(find . -maxdepth 1 -type f | wc -l)" -eq 12
+          sha256sum kivo-* Kivo-* > SHA256SUMS
+          sha256sum --check SHA256SUMS
+      - name: 创建草稿并上传全部安装包
+        shell: bash
+        run: |
           if gh release view "$VERSION" --json isDraft >/dev/null 2>&1; then
-            [[ "$(gh release view "$VERSION" --json isDraft --jq .isDraft)" == "true" ]] || { echo "该版本已经发布，拒绝覆盖"; exit 1; }
+            [[ "$(gh release view "$VERSION" --json isDraft --jq .isDraft)" == "true" ]] || { echo "已发布版本不可覆盖"; exit 1; }
           else
             {
               printf '# Kivo %s\n\n' "$VERSION"
-              printf '提供 Windows、macOS、Linux 的 AMD64 / ARM64 六个平台安装包。\n\n'
-              printf '每包包含短名程序与中文说明，无需安装 Go 或 Node.js。Mihomo 通过命令另行安装。\n\n'
-              printf 'Windows 解压运行 kivo.exe；macOS / Linux 解压运行 ./kivo。M2 Mac 请选择 darwin-arm64。\n\n'
-              printf 'SHA256SUMS 校验压缩包。程序未签名或公证；交叉构建不等同于实机验收。\n\n'
-              printf '使用说明：https://github.com/%s/blob/%s/docs/USER_MANUAL.md\n\n' "$GH_REPO" "$VERSION"
-              printf '更新记录：https://github.com/%s/blob/%s/CHANGELOG.md\n\n' "$GH_REPO" "$VERSION"
-              printf '项目自身许可证尚待所有者指定，第三方组件声明随包提供。\n'
+              printf 'Windows：一体安装器或便携 ZIP；macOS：Universal 测试 PKG 或 ZIP；Linux：CLI + 内嵌 Web。\n\n'
+              printf 'Windows 与 macOS 包内均含桌面、CLI、Web；Linux CLI 内嵌 Web。Mihomo 内核单独下载，不捆绑。\n\n'
+              printf '桌面安装包未进行商业代码签名；macOS PKG 未经 Apple Developer ID 签名或公证，仅供测试。\n\n'
+              printf '安装、升级及构建：https://github.com/%s/blob/%s/docs/INSTALL.md\n\n' "$GH_REPO" "$VERSION"
+              printf '项目采用 MIT 许可证；第三方依赖保留各自许可。\n'
             } > "$RUNNER_TEMP/release-notes.md"
             gh release create "$VERSION" --verify-tag --draft --title "Kivo $VERSION" --notes-file "$RUNNER_TEMP/release-notes.md"
           fi
-          gh release upload "$VERSION" dist/releases/kivo-* dist/releases/SHA256SUMS --clobber
-      - name: 核对资产后公开发布
+          gh release upload "$VERSION" dist/releases/* --clobber
+      - name: 核对资产后公开
         shell: bash
         run: |
-          # 确认六个压缩包和清单上传成功后再公开 Release。
-          test "$(gh release view "$VERSION" --json assets --jq '.assets | length')" -eq 7
+          test "$(gh release view "$VERSION" --json assets --jq '.assets | length')" -eq 13
           gh release edit "$VERSION" --draft=false --latest

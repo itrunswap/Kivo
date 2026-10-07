@@ -8,15 +8,17 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
 )
 
-const currentSchemaVersion = 2
+const currentSchemaVersion = 3
 
 // Config 是 Kivo 的持久化配置。
 // 配置中可能包含订阅凭据，因此配置文件始终以仅当前用户可读写的权限保存。
@@ -75,16 +77,18 @@ type SubscriptionAuth struct {
 
 // Subscription 是一个由 Mihomo proxy-provider 管理的订阅。
 type Subscription struct {
-	Name             string           `json:"name"`
-	URL              string           `json:"url"`
-	Auth             SubscriptionAuth `json:"auth,omitempty"`
-	UpdateVia        string           `json:"updateVia,omitempty"` // direct 或 proxy；空值兼容旧配置并按 direct 处理。
-	UpdateInterval   int              `json:"updateInterval"`
-	HealthInterval   int              `json:"healthInterval"`
-	HealthCheckURL   string           `json:"healthCheckURL"`
-	Enabled          bool             `json:"enabled"`
-	Group            string           `json:"group"`
-	AdditionalPrefix string           `json:"additionalPrefix,omitempty"`
+	Name             string                 `json:"name"`
+	URL              string                 `json:"url"`
+	Auth             SubscriptionAuth       `json:"auth,omitempty"`
+	Decryption       SubscriptionDecryption `json:"decryption,omitempty"`
+	Options          SubscriptionOptions    `json:"options,omitempty"`
+	UpdateVia        string                 `json:"updateVia,omitempty"` // direct 或 proxy；空值兼容旧配置并按 direct 处理。
+	UpdateInterval   int                    `json:"updateInterval"`
+	HealthInterval   int                    `json:"healthInterval"`
+	HealthCheckURL   string                 `json:"healthCheckURL"`
+	Enabled          bool                   `json:"enabled"`
+	Group            string                 `json:"group"`
+	AdditionalPrefix string                 `json:"additionalPrefix,omitempty"`
 }
 
 // SubscriptionGroup 将多个供应商组织成可以独占切换或组合启用的集合。
@@ -206,14 +210,35 @@ func Load(paths Paths) (*Store, error) {
 	if err := json.Unmarshal(data, &store.cfg); err != nil {
 		return nil, fmt.Errorf("解析配置: %w", err)
 	}
-	if store.cfg.SchemaVersion == 1 {
+	originalVersion := store.cfg.SchemaVersion
+	if originalVersion == 1 {
 		migrateV1(&store.cfg)
-		if err := store.saveLocked(); err != nil {
-			return nil, fmt.Errorf("迁移配置: %w", err)
-		}
+	} else if originalVersion == 2 {
+		// V3 引入分层凭据。升级版本号防止旧程序忽略新字段后写回而丢失密码。
+		// 旧订阅保持原样，Credentials 在读取时无损解释。
+		store.cfg.SchemaVersion = currentSchemaVersion
 	}
 	if err := validate(store.cfg); err != nil {
 		return nil, fmt.Errorf("配置无效: %w", err)
+	}
+	if originalVersion != currentSchemaVersion {
+		backup := filepath.Join(paths.Root, fmt.Sprintf("config.v%d.backup.json", originalVersion))
+		file, backupErr := os.OpenFile(backup, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		if backupErr == nil {
+			_, backupErr = file.Write(data)
+			closeErr := file.Close()
+			if backupErr == nil {
+				backupErr = closeErr
+			}
+		} else if errors.Is(backupErr, os.ErrExist) {
+			backupErr = nil
+		}
+		if backupErr != nil {
+			return nil, fmt.Errorf("备份升级前配置: %w", backupErr)
+		}
+		if err := store.saveLocked(); err != nil {
+			return nil, fmt.Errorf("迁移配置: %w", err)
+		}
 	}
 	return store, nil
 }
@@ -272,6 +297,9 @@ func defaultRouting() RoutingConfig {
 	}
 }
 
+// DefaultRouting 返回全新内置路由模板，用于修复旧版本曾允许删除的预设。
+func DefaultRouting() RoutingConfig { return defaultRouting() }
+
 // migrateV1 只做无损结构补全；敏感字段和用户现有设置保持不变。
 func migrateV1(cfg *Config) {
 	cfg.SchemaVersion = currentSchemaVersion
@@ -298,6 +326,20 @@ func (s *Store) Snapshot() Config {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return cloneConfig(s.cfg)
+}
+
+// Preview 在内存副本上运行相同校验，不写盘；适用于外部内核预检后再提交。
+func (s *Store) Preview(fn func(*Config) error) (Config, error) {
+	s.mu.RLock()
+	next := cloneConfig(s.cfg)
+	s.mu.RUnlock()
+	if err := fn(&next); err != nil {
+		return Config{}, err
+	}
+	if err := validate(next); err != nil {
+		return Config{}, err
+	}
+	return next, nil
 }
 
 // Update 在锁内修改、校验并原子保存配置。
@@ -419,6 +461,9 @@ func validate(cfg Config) error {
 	}
 	names := make(map[string]struct{}, len(cfg.Subscriptions))
 	for _, sub := range cfg.Subscriptions {
+		if err := validateSubscriptionOptions(sub); err != nil {
+			return fmt.Errorf("订阅 %s: %w", sub.Name, err)
+		}
 		name := strings.TrimSpace(sub.Name)
 		if name == "" {
 			return errors.New("订阅名称不能为空")
@@ -475,6 +520,18 @@ func validateRouting(routing RoutingConfig) error {
 		for _, rule := range group.Rules {
 			if !slices.Contains(types, strings.ToLower(rule.Type)) || strings.TrimSpace(rule.Value) == "" || !slices.Contains(actions, strings.ToLower(rule.Action)) {
 				return fmt.Errorf("规则组 %s 中存在无效规则", group.Name)
+			}
+			// 在写入配置前校验最容易导致内核拒绝启动的格式，错误定位到具体规则。
+			switch strings.ToLower(rule.Type) {
+			case "ip-cidr", "ip-cidr6":
+				prefix, err := netip.ParsePrefix(rule.Value)
+				if err != nil || (rule.Type == "ip-cidr" && !prefix.Addr().Is4()) || (rule.Type == "ip-cidr6" && !prefix.Addr().Is6()) {
+					return fmt.Errorf("规则组 %s 的 %s 不是有效网段: %s", group.Name, rule.Type, rule.Value)
+				}
+			case "domain-regex":
+				if _, err := regexp.Compile(rule.Value); err != nil {
+					return fmt.Errorf("规则组 %s 的域名正则无效: %w", group.Name, err)
+				}
 			}
 		}
 	}

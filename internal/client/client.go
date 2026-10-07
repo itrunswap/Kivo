@@ -263,6 +263,9 @@ func (c *Client) SubscriptionGroups(ctx context.Context) ([]config.SubscriptionG
 func (c *Client) CreateSubscriptionGroup(ctx context.Context, name string) error {
 	return c.do(ctx, http.MethodPost, "/api/v1/subscription-groups", map[string]string{"name": name}, nil)
 }
+func (c *Client) RenameSubscriptionGroup(ctx context.Context, name, newName string) error {
+	return c.do(ctx, http.MethodPatch, "/api/v1/subscription-groups", map[string]string{"name": name, "newName": newName}, nil)
+}
 func (c *Client) SetSubscriptionGroup(ctx context.Context, name, action string) error {
 	return c.do(ctx, http.MethodPost, "/api/v1/subscription-groups/action", map[string]string{"name": name, "action": action}, nil)
 }
@@ -273,6 +276,9 @@ func (c *Client) Routing(ctx context.Context) (config.RoutingConfig, error) {
 	var out config.RoutingConfig
 	err := c.do(ctx, http.MethodGet, "/api/v1/routing", nil, &out)
 	return out, err
+}
+func (c *Client) RestoreRouteDefaults(ctx context.Context) error {
+	return c.do(ctx, http.MethodPost, "/api/v1/routing/restore", map[string]any{}, nil)
 }
 func (c *Client) UseRouteProfile(ctx context.Context, name string) error {
 	return c.do(ctx, http.MethodPost, "/api/v1/routing/profiles/use", map[string]string{"name": name}, nil)
@@ -294,6 +300,15 @@ func (c *Client) DeleteRuleGroup(ctx context.Context, name string) error {
 }
 func (c *Client) AddRouteRule(ctx context.Context, group string, rule config.RouteRule) error {
 	return c.do(ctx, http.MethodPost, "/api/v1/routing/rules", map[string]any{"group": group, "rule": rule}, nil)
+}
+func (c *Client) UpdateRouteRule(ctx context.Context, group string, index int, expected, rule config.RouteRule) error {
+	return c.do(ctx, http.MethodPatch, "/api/v1/routing/rules", map[string]any{"group": group, "index": index, "expected": expected, "rule": rule}, nil)
+}
+func (c *Client) MoveRouteRule(ctx context.Context, group string, from, to int, expected config.RouteRule) error {
+	return c.do(ctx, http.MethodPost, "/api/v1/routing/rules/move", map[string]any{"group": group, "from": from, "to": to, "expected": expected}, nil)
+}
+func (c *Client) RemoveRouteRuleChecked(ctx context.Context, group string, index int, expected config.RouteRule) error {
+	return c.do(ctx, http.MethodDelete, fmt.Sprintf("/api/v1/routing/rules?group=%s&index=%d", url.QueryEscape(group), index), map[string]any{"expected": expected}, nil)
 }
 func (c *Client) RemoveRouteRule(ctx context.Context, group string, index int) error {
 	return c.do(ctx, http.MethodDelete, fmt.Sprintf("/api/v1/routing/rules?group=%s&index=%d", url.QueryEscape(group), index), nil, nil)

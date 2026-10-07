@@ -1,6 +1,6 @@
 // 纯状态派生规则独立于 DOM，供 Windows/macOS/Linux 共用并进行单元测试。
 export const modes = {
-  rule: "规则模式",
+  rule: "规则分流",
   global: "全局代理",
   direct: "全部直连",
 };
@@ -19,6 +19,30 @@ export function fresh(report, now = Date.now()) {
   return (
     Number.isFinite(checked) && checked <= now + 5000 && now - checked <= 120000
   );
+}
+
+// 首页只展示检测发生的时间；记录是否仍可作为联网证据由 fresh 和状态页判断。
+export function checkTime(report, now = Date.now()) {
+  if (!report?.checkedAt) return "尚未检测";
+  const checked = new Date(report.checkedAt);
+  if (!Number.isFinite(checked.getTime())) return "尚未检测";
+  const time = checked.toLocaleTimeString("zh-CN", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+  const today = new Date(now);
+  if (checked.toDateString() === today.toDateString()) return time;
+  return `${checked.toLocaleDateString("zh-CN", { month: "numeric", day: "numeric" })} ${time}`;
+}
+
+// 简洁首页用节点名作主标题；异常细节和检测证据仍留在状态页。
+export function homeConnectionTitle(view, overview, online = true) {
+  if (!online || !overview) return "后台未连接";
+  if (!view.on) return "未连接";
+  if (overview.core?.mode === "direct") return "直连模式";
+  const node = overview.core?.currentNode?.trim();
+  return node && node !== "DIRECT" ? node : "已连接 · 未选择节点";
 }
 
 export function connectionView(overview, online = true, now = Date.now()) {
@@ -46,12 +70,14 @@ export function connectionView(overview, online = true, now = Date.now()) {
     fresh(report, now) && entry?.state === "ok" && node?.state === "ok";
   const on = running && attached && port;
   let title = on
-    ? "已连接"
+    ? verified
+      ? "已启用 · 检测通过"
+      : "已启用 · 未检测"
     : attached
       ? "代理入口异常"
       : running
         ? "仅内核运行"
-        : "未连接";
+        : "未启用";
   let detail = attached
     ? "系统代理已接入"
     : overview.systemProxy?.state === "other"

@@ -152,8 +152,9 @@ test("原生 select 的 type 属性只读，所有下拉表单仍可初始化", 
   );
   assert.equal(h.run('form.elements.namedItem("mode").value'), "rule");
   h.run('state.groups=[{name:"default"}];addSubscription()');
-  assert.equal(h.nodes.get("dialog").open, true);
-  assert.equal(h.nodes.get("dialogTitle").textContent, "添加订阅");
+  assert.equal(h.nodes.get("subscriptionEditor").hidden, false);
+  assert.equal(h.nodes.get("editorTitle").textContent, "添加订阅");
+  assert.equal(h.nodes.get("mainTabs").hidden, true);
 });
 
 test("订阅更新结果弹窗保留部分成功数量，不被输入弹窗再次关闭", async () => {
@@ -192,14 +193,85 @@ test("编辑不把脱敏地址或空密码覆盖真实配置", async () => {
     return { status: 200, data: { updated: true } };
   });
   h.run(
-    'state.groups=[{name:"default"}];refreshChanged=async()=>[];renderNodes=()=>{};renderOverview=()=>{};editSubscription({name:"A",url:"https://masked.invalid?token=***",group:"default",authType:"aes",updateVia:"direct"})',
+    'state.online=true;state.overview={subscriptionEditorVersion:1};state.groups=[{name:"default"}];refreshChanged=async()=>[];renderNodes=()=>{};renderOverview=()=>{};editSubscription({name:"A",revision:"r1",url:"https://masked.invalid?token=***",group:"default",authType:"aes",updateVia:"direct"})',
   );
-  const form = h.nodes.get("dialogBody").children[0];
-  await form.events.get("submit")({ preventDefault() {} });
+  const form = h.nodes.get("subscriptionForm");
+  await form.onsubmit({ preventDefault() {} });
   assert.equal(input.reference, "A");
   assert.equal(input.url, undefined);
   assert.equal(input.secret, undefined);
   assert.equal(input.authType, undefined);
+  assert.equal(input.decryption.type, "aes");
+  assert.equal(input.decryption.secret, undefined);
+  assert.equal(input.downloadAuth.type, "none");
+  assert.equal(input.revision, "r1");
+});
+
+test("独立编辑页保存失败保留草稿，返回需确认，放弃后恢复滚动位置", async () => {
+  const h = harness(async () => ({ status: 400, error: "测试保存失败" }));
+  h.run(
+    'state.online=true;state.overview={subscriptionEditorVersion:1};$("content").scrollTop=310;addSubscription();state.editor.fields.url.value="https://example.com/sub";state.editor.fields.decryptSecret.value=" demo password ";state.editor.fields.decryptionType.value="aes";$("subscriptionForm").oninput()',
+  );
+  await h.nodes.get("subscriptionForm").onsubmit({ preventDefault() {} });
+  assert.equal(
+    h.run("state.editor.fields.decryptSecret.value"),
+    " demo password ",
+  );
+  assert.equal(h.nodes.get("editorError").textContent, "测试保存失败");
+  h.run("leaveSubscriptionEditor()");
+  assert.equal(h.nodes.get("dialog").open, true);
+  assert.ok(h.run("state.editor"));
+  const actions = h.nodes.get("dialogBody").children[1];
+  await actions.children[1].events.get("click")();
+  assert.equal(h.run("state.editor"), null);
+  assert.equal(h.nodes.get("content").scrollTop, 310);
+  assert.equal(h.nodes.get("subscriptionForm").children.length, 0);
+});
+
+test("下载认证与解密分别提交，密码空格不被截断，切换认证必须补全凭据", () => {
+  const h = harness();
+  h.run(
+    'addSubscription();state.editor.fields.url.value="https://example.com";state.editor.fields.downloadAuthType.value="basic";state.editor.fields.username.value="alice";state.editor.fields.authSecret.value=" http secret ";state.editor.fields.decryptionType.value="aes";state.editor.fields.decryptSecret.value=" aes secret "',
+  );
+  const body = h.run("subscriptionEditorPayload(state.editor)");
+  assert.equal(body.downloadAuth.secret, " http secret ");
+  assert.equal(body.decryption.secret, " aes secret ");
+  h.run('state.editor.fields.authSecret.value=""');
+  assert.throws(
+    () => h.run("subscriptionEditorPayload(state.editor)"),
+    /完整的下载认证/,
+  );
+});
+
+test("旧后台不能悄悄忽略新版订阅字段", async () => {
+  let calls = 0;
+  const h = harness(async () => {
+    calls++;
+    return { status: 200 };
+  });
+  h.run(
+    'state.online=true;state.overview={};addSubscription();state.editor.fields.url.value="https://example.com"',
+  );
+  await h.nodes.get("subscriptionForm").onsubmit({ preventDefault() {} });
+  assert.equal(calls, 0);
+  assert.match(h.nodes.get("editorError").textContent, /后台版本较旧/);
+});
+
+test("单订阅更新就地显示节点数和真实路径，不重建编辑草稿", async () => {
+  const h = harness(async () => ({
+    status: 200,
+    data: {
+      results: [{ name: "A", nodeCount: 8, via: "proxy" }],
+      temporarilyStartedCore: true,
+    },
+  }));
+  h.run("refreshChanged=async()=>[];renderNodes=()=>{};renderOverview=()=>{}");
+  await h.run('updateOneSubscription("A")');
+  assert.match(
+    h.run('state.subscriptionResults.get("A").text'),
+    /代理更新完成.*8 个节点.*恢复停止/,
+  );
+  assert.equal(h.run("state.busy"), false);
 });
 
 test("事务结束解除忙碌状态但不重建节点列表", () => {
@@ -338,6 +410,53 @@ test("设置刷新保留未保存草稿及其原版本", async () => {
   assert.match(h.nodes.get("settingsDraft").textContent, /当前草稿已保留/);
 });
 
+test("设置无修改时不显示同步提示，保存区位于表单尾部", () => {
+  const h = harness();
+  h.run('state.settings={revision:"current",mixedPort:17890};state.versions=[];renderSettings(true)');
+  assert.equal(h.nodes.get("settingsDraft").textContent, "");
+  assert.equal(h.nodes.get("settingsDraft").hidden, true);
+  h.run("state.dirty=true;renderSettings(true)");
+  assert.equal(h.nodes.get("settingsDraft").hidden, false);
+  const html = readFileSync(new URL("../desktop/frontend/index.html", import.meta.url), "utf8");
+  const css = readFileSync(new URL("../desktop/frontend/app.css", import.meta.url), "utf8");
+  assert.match(html, /class="settings-form-footer"[\s\S]*id="settingsDraft"[\s\S]*保存代理设置/);
+  assert.match(css, /scrollbar-gutter:\s*stable both-edges/);
+  assert.match(css, /\.connection-main\s*\{[^}]*height:\s*66px/);
+  assert.match(css, /\.connection-card > \.setting-row\s*\{[^}]*height:\s*66px/);
+});
+
+test("状态已启用时隐藏重复的泛化检测提示", () => {
+  const h = harness();
+  h.run('state.online=true;state.overview={display:{title:"已启用 · 未检测",detail:"系统代理已接入",on:true,tone:"active"},connection:{detail:"内核运行不等于外网可用；请执行一次联网检测。"}};state.dataKey=JSON.stringify([state.overview,state.online,fresh(state.overview?.connectivity)]);renderData()');
+  assert.equal(h.nodes.get("statusExplanation").textContent, "");
+  assert.equal(h.nodes.get("statusExplanation").hidden, true);
+});
+
+test("当前内核版本合并进状态行，非活动版本才允许切换和删除", () => {
+  const h = harness();
+  h.run('state.overview={core:{state:"running",version:"v1"},systemProxy:{}};state.versions=[{version:"v1",active:true},{version:"v2",active:false}];renderSettings()');
+  assert.equal(h.nodes.get("coreRunState").textContent, "运行中");
+  assert.equal(h.nodes.get("installedCore").textContent, "v1");
+  assert.equal(h.nodes.get("activeCoreBadge").hidden, false);
+  assert.equal(h.nodes.get("coreStart").hidden, true);
+  assert.equal(h.nodes.get("coreStop").hidden, false);
+  assert.equal(h.nodes.get("coreUse").dataset.blocked, "false");
+  assert.equal(h.nodes.get("coreDelete").dataset.blocked, "false");
+  h.run('state.versions=[{version:"v1",active:true}];renderSettings()');
+  assert.equal(h.nodes.get("coreUse").dataset.blocked, "true");
+  assert.equal(h.nodes.get("coreDelete").dataset.blocked, "true");
+  h.run('state.overview.core.version="v3";renderSettings()');
+  assert.equal(h.nodes.get("activeCoreBadge").hidden, true);
+});
+
+test("日志读取成功后不显示刷新频率文案", async () => {
+  const h = harness(async () => ({ status: 200, data: ["[INFO] ready"] }));
+  h.run('state.online=true;state.tab="data"');
+  await h.run('loadLogs()');
+  assert.equal(h.nodes.get("logs").textContent, "[INFO] ready");
+  assert.equal(h.nodes.get("logStatus").textContent, "");
+});
+
 test("旧后台不支持局部保存时禁止发送危险 PATCH", async () => {
   let called = false;
   const h = harness(async () => {
@@ -355,6 +474,47 @@ test("重复点击当前标签不跳回页面顶部", () => {
   const h = harness();
   h.run('$("content").scrollTop=237;setTab("home")');
   assert.equal(h.nodes.get("content").scrollTop, 237);
+});
+
+test("进入状态页自动诊断和读取日志，离开后不继续请求", async () => {
+  const calls = [];
+  const h = harness(async (_method, path) => {
+    calls.push(path);
+    if (path.endsWith("/doctor"))
+      return {
+        status: 200,
+        data: [{ name: "代理端口", status: "ok", message: "可用" }],
+      };
+    if (path.includes("/logs")) return { status: 200, data: ["[INFO] 已启动"] };
+    return { status: 200, data: {} };
+  });
+  h.run('state.online=true;setTab("data")');
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(calls.some((path) => path.endsWith("/doctor")));
+  assert.ok(calls.some((path) => path.includes("/logs")));
+  assert.equal(h.nodes.get("logs").textContent, "[INFO] 已启动");
+  assert.equal(h.run("state.doctorLoaded"), true);
+  h.run('setTab("home")');
+  const count = calls.length;
+  await h.run("loadLogs()");
+  assert.equal(calls.length, count);
+});
+
+test("离开状态页后旧日志响应不能覆盖当前页面", async () => {
+  let finish;
+  const h = harness(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
+  const pending = h.run(
+    '$("logs").textContent="旧内容";state.online=true;state.tab="data";loadLogs()',
+  );
+  h.run('state.tab="home";state.dataEpoch++');
+  finish({ status: 200, data: ["过期日志"] });
+  await pending;
+  assert.equal(h.nodes.get("logs").textContent, "旧内容");
 });
 
 test("操作返回恢复警告时不能改写为成功", async () => {

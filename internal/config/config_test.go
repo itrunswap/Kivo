@@ -115,8 +115,41 @@ func TestLoadMigratesV1Configuration(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := store.Snapshot()
-	if cfg.SchemaVersion != 2 || cfg.Subscriptions[0].Group != "default" || cfg.Routing.ActiveProfile != "rule" || cfg.Mihomo.DownloadRetry != 4 {
+	if cfg.SchemaVersion != currentSchemaVersion || cfg.Subscriptions[0].Group != "default" || cfg.Routing.ActiveProfile != "rule" || cfg.Mihomo.DownloadRetry != 4 {
 		t.Fatalf("migration result = %#v", cfg)
+	}
+}
+
+func TestLoadV2PreservesCredentialsAndBackup(t *testing.T) {
+	paths, _ := ResolvePaths(t.TempDir())
+	cfg, err := defaultConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.SchemaVersion = 2
+	cfg.Subscriptions = []Subscription{{Name: "old", URL: "https://example.com/sub", Group: "default", Enabled: true, Auth: SubscriptionAuth{Type: "aes", Secret: " old-password "}}}
+	data, _ := json.Marshal(cfg)
+	if err = os.WriteFile(paths.ConfigFile, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := Load(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, decrypt := store.Snapshot().Subscriptions[0].Credentials()
+	if store.Snapshot().SchemaVersion != currentSchemaVersion || decrypt.Secret != " old-password " {
+		t.Fatal("migration lost credential")
+	}
+	backup, err := os.ReadFile(filepath.Join(paths.Root, "config.v2.backup.json"))
+	if err != nil || string(backup) != string(data) {
+		t.Fatal("migration backup is not the original bytes")
+	}
+	if _, err = Load(paths); err != nil {
+		t.Fatal(err)
+	}
+	backupAgain, _ := os.ReadFile(filepath.Join(paths.Root, "config.v2.backup.json"))
+	if string(backupAgain) != string(backup) {
+		t.Fatal("backup was overwritten")
 	}
 }
 

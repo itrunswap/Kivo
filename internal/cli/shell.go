@@ -450,6 +450,9 @@ func (s *Shell) subscriptionCommand(ctx context.Context, args []string) error {
 			return err
 		}
 		fmt.Fprintf(s.out, "  名称：%s\n  分组：%s\n  状态：%s\n  地址：%s\n  认证：%s\n  更新路径：%s\n  更新：%d 秒\n  健康检查：%d 秒\n", item.Name, item.Group, onOff(item.Enabled), item.URL, item.AuthType, item.UpdateVia, item.UpdateInterval, item.HealthInterval)
+		if item.DownloadAuthType != "" {
+			fmt.Fprintf(s.out, "  下载认证：%s\n  内容解密：%s\n", item.DownloadAuthType, item.DecryptionType)
+		}
 		return nil
 	case "enable", "disable":
 		if len(args) < 2 {
@@ -744,7 +747,7 @@ func validateSubscriptionOptions(options map[string]string, edit bool) error {
 
 func (s *Shell) subscriptionGroupCommand(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return errors.New("用法：/sub group list|create|use|enable|disable|remove")
+		return errors.New("用法：/sub group list|create|rename|use|enable|disable|remove")
 	}
 	switch args[0] {
 	case "list":
@@ -767,6 +770,13 @@ func (s *Shell) subscriptionGroupCommand(ctx context.Context, args []string) err
 		if err := s.client.CreateSubscriptionGroup(ctx, strings.Join(args[1:], " ")); err != nil {
 			return err
 		}
+	case "rename":
+		if len(args) != 3 {
+			return errors.New("用法：/sub group rename <原名称> <新名称>；名称含空格时请加引号")
+		}
+		if err := s.client.RenameSubscriptionGroup(ctx, args[1], args[2]); err != nil {
+			return err
+		}
 	case "use", "enable", "disable":
 		if len(args) < 2 {
 			return fmt.Errorf("用法：/sub group %s <名称>", args[0])
@@ -782,7 +792,7 @@ func (s *Shell) subscriptionGroupCommand(ctx context.Context, args []string) err
 			return err
 		}
 	default:
-		return errors.New("用法：/sub group list|create|use|enable|disable|remove")
+		return errors.New("用法：/sub group list|create|rename|use|enable|disable|remove")
 	}
 	fmt.Fprintln(s.out, s.paint(green, "✓ 订阅分组已更新"))
 	return nil
