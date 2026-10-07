@@ -53,7 +53,7 @@ PKG_ROOT=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/kivo-pkg.XXXXXX")
 mkdir -p "$PKG_ROOT/Applications" "$PKG_ROOT/usr/local/bin" "$PKG_ROOT/usr/local/share/doc/kivo"
 ditto "$APP" "$PKG_ROOT/Applications/Kivo.app"
 cp "$CLI_BUILD/kivo" "$PKG_ROOT/usr/local/bin/kivo"
-cp LICENSE THIRD_PARTY_NOTICES.md docs/DESKTOP.md docs/INSTALL.md "$PKG_ROOT/usr/local/share/doc/kivo/"
+cp LICENSE THIRD_PARTY_NOTICES.md desktop/THIRD_PARTY_LICENSES.txt docs/DESKTOP.md docs/INSTALL.md "$PKG_ROOT/usr/local/share/doc/kivo/"
 PKG_VERSION=${VERSION#v}
 PKG_VERSION=${PKG_VERSION%%-*}
 pkgbuild --root "$PKG_ROOT" --identifier io.github.itrunswap.kivo --version "$PKG_VERSION" --install-location / "$OUTPUT/Kivo-Installer-darwin-universal.pkg"

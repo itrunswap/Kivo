@@ -1,12 +1,16 @@
 # 更新记录
 
-## v0.4.0（待发布）
+## v0.4.1（打包修正）
+
+- macOS PKG 随应用和 CLI 一并安装桌面第三方依赖许可文本，与 ZIP 包的声明保持一致。
+
+## v0.4.0
 
 - Kivo 源码以 MIT 许可证开放，发行包附带 `LICENSE` 与第三方组件声明。
 - 统一中文下载安装指南：Windows 一体安装器和便携 ZIP、macOS Universal 测试 PKG/ZIP、Linux CLI + 内嵌 Web，以及源码构建、校验、升级和卸载。
 - 版本标签工作流分别在 Windows/macOS 原生环境构建桌面包，并与六平台 CLI 包汇总校验；全部通过后才公开 Release。
 - 桌面首页、配置、状态和设置页面继续统一紧凑布局，改进订阅编辑、路由安全校验、日志与诊断刷新、托盘及局部交互。
-- Windows AMD64/ARM64 便携包和 NSIS 安装器已在 Windows 本地构建；macOS 桌面与 PKG 须待 Mac 原生 CI 和实机验收。当前提交尚未公开发布。
+- Windows AMD64/ARM64 便携包和 NSIS 安装器通过本地与原生 CI 构建；macOS 桌面与 PKG 通过 Mac 原生 CI，仍须用户实机验收。
 
 ## v0.3.2 Desktop Preview（交互与状态可靠性）
 
